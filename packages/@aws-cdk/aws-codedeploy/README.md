@@ -53,6 +53,12 @@ const deploymentGroup = new codedeploy.ServerDeploymentGroup(this, 'CodeDeployDe
             'key2': ['v3'],
         },
     ),
+    // auto-rollback configuration
+    autoRollback: {
+        failedDeployment: true, // default: true,
+        stoppedDeployment: true, // default: true,
+        deploymentInAlarm: true, // default: true,
+    },
 });
 ```
 

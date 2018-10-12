@@ -135,6 +135,33 @@ export class InstanceTagSet {
 }
 
 /**
+ * The configuration for automatically rolling back deployments in a given Deployment Group.
+ */
+export interface IAutoRollbackConfig {
+  /**
+   * Whether to automatically roll back a deployment that fails.
+   *
+   * @default true
+   */
+  failedDeployment?: boolean;
+
+  /**
+   * Whether to automatically roll back a deployment that was manually stopped.
+   *
+   * @default true
+   */
+  stoppedDeployment?: boolean;
+
+  /**
+   * Whether to automatically roll back a deployment during which one of the configured
+   * CloudWatch alarms for this Deployment Group went off.
+   *
+   * @default true
+   */
+  deploymentInAlarm?: boolean;
+}
+
+/**
  * Construction properties for {@link ServerDeploymentGroup}.
  */
 export interface ServerDeploymentGroupProps {
@@ -202,6 +229,8 @@ export interface ServerDeploymentGroupProps {
    * @default no additional on-premise instances will be added to the Deployment Group
    */
   onPremiseInstanceTags?: InstanceTagSet;
+
+  autoRollback?: IAutoRollbackConfig;
 }
 
 /**
@@ -255,6 +284,7 @@ export class ServerDeploymentGroup extends ServerDeploymentGroupRef {
         },
       ec2TagSet: this.ec2TagSet(props.ec2InstanceTags),
       onPremisesTagSet: this.onPremiseTagSet(props.onPremiseInstanceTags),
+      autoRollbackConfiguration: this.autoRollbackConfig(props.autoRollback || {}),
     });
 
     this.deploymentGroupName = resource.deploymentGroupName;
@@ -403,6 +433,31 @@ export class ServerDeploymentGroup extends ServerDeploymentGroupRef {
       }
     }
     return tagsInGroup;
+  }
+
+  private autoRollbackConfig(autoRollbackConfig: IAutoRollbackConfig):
+      cloudformation.DeploymentGroupResource.AutoRollbackConfigurationProperty | undefined {
+    const events = new Array<string>();
+    if (this.optionalBoolDefaultTrue(autoRollbackConfig.failedDeployment)) {
+      events.push('DEPLOYMENT_FAILURE');
+    }
+    if (this.optionalBoolDefaultTrue(autoRollbackConfig.stoppedDeployment)) {
+      events.push('DEPLOYMENT_STOP_ON_REQUEST');
+    }
+    if (this.optionalBoolDefaultTrue(autoRollbackConfig.deploymentInAlarm)) {
+      events.push('DEPLOYMENT_STOP_ON_ALARM');
+    }
+
+    return events.length > 0
+      ? {
+        enabled: true,
+        events,
+      }
+      : undefined;
+  }
+
+  private optionalBoolDefaultTrue(value?: boolean): boolean {
+    return value !== false;
   }
 }
 

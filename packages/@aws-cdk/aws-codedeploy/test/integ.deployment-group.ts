@@ -25,6 +25,11 @@ new codedeploy.ServerDeploymentGroup(stack, 'CodeDeployGroup', {
   deploymentConfig: codedeploy.ServerDeploymentConfig.AllAtOnce,
   autoScalingGroups: [asg],
   loadBalancer: elb,
+  autoRollback: {
+    failedDeployment: false,
+    stoppedDeployment: false,
+    deploymentInAlarm: false,
+  },
 });
 
 app.run();
