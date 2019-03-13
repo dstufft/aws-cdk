@@ -5,7 +5,7 @@ import cdk = require('@aws-cdk/cdk');
 import { BaseService, BaseServiceProps } from '../base/base-service';
 import { NetworkMode, TaskDefinition } from '../base/task-definition';
 import { ICluster } from '../cluster';
-import { cloudformation } from '../ecs.generated';
+import { CfnService } from '../ecs.generated';
 import { isEc2Compatible } from '../util';
 
 /**
@@ -38,7 +38,7 @@ export interface Ec2ServiceProps extends BaseServiceProps {
    *
    * @default A new security group is created
    */
-  securityGroup?: ec2.SecurityGroupRef;
+  securityGroup?: ec2.ISecurityGroup;
 
   /**
    * Whether to start services on distinct instances
@@ -67,12 +67,12 @@ export class Ec2Service extends BaseService implements elb.ILoadBalancerTarget {
    */
   public readonly clusterName: string;
 
-  private readonly constraints: cloudformation.ServiceResource.PlacementConstraintProperty[];
-  private readonly strategies: cloudformation.ServiceResource.PlacementStrategyProperty[];
+  private readonly constraints: CfnService.PlacementConstraintProperty[];
+  private readonly strategies: CfnService.PlacementStrategyProperty[];
   private readonly daemon: boolean;
   private readonly cluster: ICluster;
 
-  constructor(parent: cdk.Construct, name: string, props: Ec2ServiceProps) {
+  constructor(scope: cdk.Construct, id: string, props: Ec2ServiceProps) {
     if (props.daemon && props.desiredCount !== undefined) {
       throw new Error('Daemon mode launches one task on every instance. Don\'t supply desiredCount.');
     }
@@ -81,7 +81,12 @@ export class Ec2Service extends BaseService implements elb.ILoadBalancerTarget {
       throw new Error('Supplied TaskDefinition is not configured for compatibility with EC2');
     }
 
-    super(parent, name, props, {
+    super(scope, id, {
+      ...props,
+      // If daemon, desiredCount must be undefined and that's what we want. Otherwise, default to 1.
+      desiredCount: props.daemon || props.desiredCount !== undefined ? props.desiredCount : 1,
+    },
+    {
       cluster: props.cluster.clusterName,
       taskDefinition: props.taskDefinition.taskDefinitionArn,
       launchType: 'EC2',
@@ -188,7 +193,7 @@ export class Ec2Service extends BaseService implements elb.ILoadBalancerTarget {
 
     this.loadBalancers.push({
       loadBalancerName: loadBalancer.loadBalancerName,
-      containerName: this.taskDefinition.defaultContainer!.id,
+      containerName: this.taskDefinition.defaultContainer!.node.id,
       containerPort: this.taskDefinition.defaultContainer!.containerPort,
     });
   }
@@ -226,7 +231,7 @@ export class Ec2Service extends BaseService implements elb.ILoadBalancerTarget {
   /**
    * Validate this Ec2Service
    */
-  public validate(): string[] {
+  protected validate(): string[] {
     const ret = super.validate();
     if (!this.cluster.hasEc2Capacity) {
       ret.push('Cluster for this service needs Ec2 capacity. Call addXxxCapacity() on the cluster.');

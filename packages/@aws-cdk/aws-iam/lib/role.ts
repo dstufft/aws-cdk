@@ -1,5 +1,5 @@
-import { Construct, IDependable } from '@aws-cdk/cdk';
-import { cloudformation } from './iam.generated';
+import { Construct, IConstruct, Output } from '@aws-cdk/cdk';
+import { CfnRole } from './iam.generated';
 import { IPrincipal, Policy } from './policy';
 import { ArnPrincipal, PolicyDocument, PolicyPrincipal, PolicyStatement } from './policy-document';
 import { AttachedPolicies, undefinedIfEmpty } from './util';
@@ -13,6 +13,16 @@ export interface RoleProps {
    * the `assumeRolePolicy` property.
    */
   assumedBy: PolicyPrincipal;
+
+  /**
+   * ID that the role assumer needs to provide when assuming this role
+   *
+   * If the configured and provided external IDs do not match, the
+   * AssumeRole operation will fail.
+   *
+   * @default No external ID required
+   */
+  externalId?: string;
 
   /**
    * A list of ARNs for managed policies associated with this role.
@@ -84,8 +94,8 @@ export class Role extends Construct implements IRole {
   /**
    * Import a role that already exists
    */
-  public static import(parent: Construct, id: string, props: ImportedRoleProps): IRole {
-    return new ImportedRole(parent, id, props);
+  public static import(scope: Construct, id: string, props: RoleImportProps): IRole {
+    return new ImportedRole(scope, id, props);
   }
 
   /**
@@ -99,6 +109,12 @@ export class Role extends Construct implements IRole {
   public readonly roleArn: string;
 
   /**
+   * Returns the stable and unique string identifying the role. For example,
+   * AIDAJQABLZS4A3QDU576Q.
+   */
+  public readonly roleId: string;
+
+  /**
    * Returns the name of the role.
    */
   public readonly roleName: string;
@@ -108,24 +124,19 @@ export class Role extends Construct implements IRole {
    */
   public readonly principal: PolicyPrincipal;
 
-  /**
-   * Returns the role.
-   */
-  public readonly dependencyElements: IDependable[];
-
   private defaultPolicy?: Policy;
   private readonly managedPolicyArns: string[];
   private readonly attachedPolicies = new AttachedPolicies();
 
-  constructor(parent: Construct, name: string, props: RoleProps) {
-    super(parent, name);
+  constructor(scope: Construct, id: string, props: RoleProps) {
+    super(scope, id);
 
-    this.assumeRolePolicy = createAssumeRolePolicy(props.assumedBy);
+    this.assumeRolePolicy = createAssumeRolePolicy(props.assumedBy, props.externalId);
     this.managedPolicyArns = props.managedPolicyArns || [ ];
 
     validateMaxSessionDuration(props.maxSessionDurationSec);
 
-    const role = new cloudformation.RoleResource(this, 'Resource', {
+    const role = new CfnRole(this, 'Resource', {
       assumeRolePolicyDocument: this.assumeRolePolicy as any,
       managedPolicyArns: undefinedIfEmpty(() => this.managedPolicyArns),
       policies: _flatten(props.inlinePolicies),
@@ -134,22 +145,29 @@ export class Role extends Construct implements IRole {
       maxSessionDuration: props.maxSessionDurationSec,
     });
 
+    this.roleId = role.roleId;
     this.roleArn = role.roleArn;
     this.principal = new ArnPrincipal(this.roleArn);
     this.roleName = role.roleName;
-    this.dependencyElements = [ role ];
 
     function _flatten(policies?: { [name: string]: PolicyDocument }) {
       if (policies == null || Object.keys(policies).length === 0) {
         return undefined;
       }
-      const result = new Array<cloudformation.RoleResource.PolicyProperty>();
+      const result = new Array<CfnRole.PolicyProperty>();
       for (const policyName of Object.keys(policies)) {
         const policyDocument = policies[policyName];
         result.push({ policyName, policyDocument });
       }
       return result;
     }
+  }
+
+  public export(): RoleImportProps {
+    return {
+      roleArn: new Output(this, 'RoleArn', { value: this.roleArn }).makeImportValue(),
+      roleId: new Output(this, 'RoleId', { value: this.roleId }).makeImportValue()
+    };
   }
 
   /**
@@ -161,7 +179,6 @@ export class Role extends Construct implements IRole {
     if (!this.defaultPolicy) {
       this.defaultPolicy = new Policy(this, 'DefaultPolicy');
       this.attachInlinePolicy(this.defaultPolicy);
-      this.dependencyElements.push(this.defaultPolicy);
     }
     this.defaultPolicy.addStatement(statement);
   }
@@ -182,23 +199,65 @@ export class Role extends Construct implements IRole {
     this.attachedPolicies.attach(policy);
     policy.attachToRole(this);
   }
+
+  /**
+   * Grant the actions defined in actions to the identity Principal on this resource.
+   */
+  public grant(identity?: IPrincipal, ...actions: string[]) {
+      if (!identity) {
+        return;
+      }
+
+      identity.addToPolicy(new PolicyStatement()
+        .addResource(this.roleArn)
+        .addActions(...actions));
+  }
+
+  /**
+   * Grant permissions to the given principal to pass this role.
+   */
+  public grantPassRole(identity?: IPrincipal) {
+    this.grant(identity, 'iam:PassRole');
+  }
 }
 
 /**
  * A Role object
  */
-export interface IRole extends IPrincipal, IDependable {
+export interface IRole extends IConstruct, IPrincipal {
   /**
    * Returns the ARN of this role.
    */
   readonly roleArn: string;
+
+  /**
+   * Returns the stable and unique string identifying the role. For example,
+   * AIDAJQABLZS4A3QDU576Q.
+   */
+  readonly roleId: string;
+
+  /**
+   * Returns the name of this role.
+   */
+  readonly roleName: string;
+
+  /**
+   * Export this role to another stack.
+   */
+  export(): RoleImportProps;
 }
 
-function createAssumeRolePolicy(principal: PolicyPrincipal) {
-  return new PolicyDocument()
-    .addStatement(new PolicyStatement()
+function createAssumeRolePolicy(principal: PolicyPrincipal, externalId?: string) {
+  const statement = new PolicyStatement();
+  statement
       .addPrincipal(principal)
-      .addAction(principal.assumeRoleAction));
+      .addAction(principal.assumeRoleAction);
+
+  if (externalId !== undefined) {
+    statement.addCondition('StringEquals', { 'sts:ExternalId': externalId });
+  }
+
+  return new PolicyDocument().addStatement(statement);
 }
 
 function validateMaxSessionDuration(duration?: number) {
@@ -214,11 +273,20 @@ function validateMaxSessionDuration(duration?: number) {
 /**
  * Properties to import a Role
  */
-export interface ImportedRoleProps {
+export interface RoleImportProps {
   /**
    * The role's ARN
    */
   roleArn: string;
+
+  /**
+   * The stable and unique string identifying the role. For example,
+   * AIDAJQABLZS4A3QDU576Q.
+   *
+   * @default If "roleId" is not specified for an imported role, then
+   * `role.roleId` will throw an exception. In most cases, role ID is not really needed.
+   */
+  roleId?: string;
 }
 
 /**
@@ -227,12 +295,29 @@ export interface ImportedRoleProps {
 class ImportedRole extends Construct implements IRole {
   public readonly roleArn: string;
   public readonly principal: PolicyPrincipal;
-  public readonly dependencyElements: IDependable[] = [];
 
-  constructor(parent: Construct, id: string, props: ImportedRoleProps) {
-    super(parent, id);
+  private readonly _roleId?: string;
+
+  constructor(scope: Construct, id: string, private readonly props: RoleImportProps) {
+    super(scope, id);
     this.roleArn = props.roleArn;
+    this._roleId = props.roleId;
     this.principal = new ArnPrincipal(this.roleArn);
+  }
+
+  public get roleId() {
+    if (!this._roleId) {
+      throw new Error(`No roleId specified for imported role`);
+    }
+    return this._roleId;
+  }
+
+  public get roleName() {
+    return this.node.stack.parseArn(this.roleArn).resourceName!;
+  }
+
+  public export() {
+    return this.props;
   }
 
   public addToPolicy(_statement: PolicyStatement): void {

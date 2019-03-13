@@ -1,6 +1,89 @@
-import { Construct, IDependable, Output } from "@aws-cdk/cdk";
-import { ExportSubnetGroup, ImportSubnetGroup, subnetName } from './util';
-import { VpcNetworkProvider, VpcNetworkProviderProps } from './vpc-network-provider';
+import { Construct, IConstruct, IDependable } from "@aws-cdk/cdk";
+import { subnetName } from './util';
+import { VpnConnection, VpnConnectionOptions } from './vpn';
+
+export interface IVpcSubnet extends IConstruct {
+  /**
+   * The Availability Zone the subnet is located in
+   */
+  readonly availabilityZone: string;
+
+  /**
+   * The subnetId for this particular subnet
+   */
+  readonly subnetId: string;
+
+  /**
+   * Dependable that can be depended upon to force internet connectivity established on the VPC
+   */
+  readonly internetConnectivityEstablished: IDependable;
+
+  /**
+   * Exports this subnet to another stack.
+   */
+  export(): VpcSubnetImportProps;
+}
+
+export interface IVpcNetwork extends IConstruct {
+  /**
+   * Identifier for this VPC
+   */
+  readonly vpcId: string;
+
+  /**
+   * List of public subnets in this VPC
+   */
+  readonly publicSubnets: IVpcSubnet[];
+
+  /**
+   * List of private subnets in this VPC
+   */
+  readonly privateSubnets: IVpcSubnet[];
+
+  /**
+   * List of isolated subnets in this VPC
+   */
+  readonly isolatedSubnets: IVpcSubnet[];
+
+  /**
+   * AZs for this VPC
+   */
+  readonly availabilityZones: string[];
+
+  /**
+   * Region where this VPC is located
+   */
+  readonly vpcRegion: string;
+
+  /**
+   * Identifier for the VPN gateway
+   */
+  readonly vpnGatewayId?: string;
+
+  /**
+   * Return the subnets appropriate for the placement strategy
+   */
+  subnets(placement?: VpcPlacementStrategy): IVpcSubnet[];
+
+  /**
+   * Return whether the given subnet is one of this VPC's public subnets.
+   *
+   * The subnet must literally be one of the subnet object obtained from
+   * this VPC. A subnet that merely represents the same subnet will
+   * never return true.
+   */
+  isPublicSubnet(subnet: IVpcSubnet): boolean;
+
+  /**
+   * Adds a new VPN connection to this VPC
+   */
+  addVpnConnection(id: string, options: VpnConnectionOptions): VpnConnection;
+
+  /**
+   * Exports this VPC so it can be consumed by another stack.
+   */
+  export(): VpcNetworkImportProps;
+}
 
 /**
  * The type of Subnet
@@ -74,20 +157,7 @@ export interface VpcPlacementStrategy {
 /**
  * A new or imported VPC
  */
-export abstract class VpcNetworkRef extends Construct implements IDependable {
-  /**
-   * Import an exported VPC
-   */
-  public static import(parent: Construct, name: string, props: VpcNetworkRefProps): VpcNetworkRef {
-    return new ImportedVpcNetwork(parent, name, props);
-  }
-
-  /**
-   * Import an existing VPC from context
-   */
-  public static importFromContext(parent: Construct, name: string, props: VpcNetworkProviderProps): VpcNetworkRef {
-    return VpcNetworkRef.import(parent, name, new VpcNetworkProvider(parent, props).vpcProps);
-  }
+export abstract class VpcNetworkBase extends Construct implements IVpcNetwork {
 
   /**
    * Identifier for this VPC
@@ -97,17 +167,17 @@ export abstract class VpcNetworkRef extends Construct implements IDependable {
   /**
    * List of public subnets in this VPC
    */
-  public abstract readonly publicSubnets: VpcSubnetRef[];
+  public abstract readonly publicSubnets: IVpcSubnet[];
 
   /**
    * List of private subnets in this VPC
    */
-  public abstract readonly privateSubnets: VpcSubnetRef[];
+  public abstract readonly privateSubnets: IVpcSubnet[];
 
   /**
    * List of isolated subnets in this VPC
    */
-  public abstract readonly isolatedSubnets: VpcSubnetRef[];
+  public abstract readonly isolatedSubnets: IVpcSubnet[];
 
   /**
    * AZs for this VPC
@@ -115,14 +185,24 @@ export abstract class VpcNetworkRef extends Construct implements IDependable {
   public abstract readonly availabilityZones: string[];
 
   /**
-   * Parts of the VPC that constitute full construction
+   * Identifier for the VPN gateway
    */
-  public readonly dependencyElements: IDependable[] = [];
+  public abstract readonly vpnGatewayId?: string;
+
+  /**
+   * Dependencies for internet connectivity
+   */
+  public readonly internetDependencies = new Array<IConstruct>();
+
+  /**
+   * Dependencies for NAT connectivity
+   */
+  public readonly natDependencies = new Array<IConstruct>();
 
   /**
    * Return the subnets appropriate for the placement strategy
    */
-  public subnets(placement: VpcPlacementStrategy = {}): VpcSubnetRef[] {
+  public subnets(placement: VpcPlacementStrategy = {}): IVpcSubnet[] {
     if (placement.subnetsToUse !== undefined && placement.subnetName !== undefined) {
       throw new Error('At most one of subnetsToUse and subnetName can be supplied');
     }
@@ -148,24 +228,19 @@ export abstract class VpcNetworkRef extends Construct implements IDependable {
   }
 
   /**
+   * Adds a new VPN connection to this VPC
+   */
+  public addVpnConnection(id: string, options: VpnConnectionOptions): VpnConnection {
+    return new VpnConnection(this, id, {
+      vpc: this,
+      ...options
+    });
+  }
+
+  /**
    * Export this VPC from the stack
    */
-  public export(): VpcNetworkRefProps {
-    const pub = new ExportSubnetGroup(this, 'PublicSubnetIDs', this.publicSubnets, SubnetType.Public, this.availabilityZones.length);
-    const priv = new ExportSubnetGroup(this, 'PrivateSubnetIDs', this.privateSubnets, SubnetType.Private, this.availabilityZones.length);
-    const iso = new ExportSubnetGroup(this, 'IsolatedSubnetIDs', this.isolatedSubnets, SubnetType.Isolated, this.availabilityZones.length);
-
-    return {
-      vpcId: new Output(this, 'VpcId', { value: this.vpcId }).makeImportValue().toString(),
-      availabilityZones: this.availabilityZones,
-      publicSubnetIds: pub.ids,
-      publicSubnetNames: pub.names,
-      privateSubnetIds: priv.ids,
-      privateSubnetNames: priv.names,
-      isolatedSubnetIds: iso.ids,
-      isolatedSubnetNames: iso.names,
-    };
-  }
+  public abstract export(): VpcNetworkImportProps;
 
   /**
    * Return whether the given subnet is one of this VPC's public subnets.
@@ -174,62 +249,23 @@ export abstract class VpcNetworkRef extends Construct implements IDependable {
    * this VPC. A subnet that merely represents the same subnet will
    * never return true.
    */
-  public isPublicSubnet(subnet: VpcSubnetRef) {
+  public isPublicSubnet(subnet: IVpcSubnet) {
     return this.publicSubnets.indexOf(subnet) > -1;
   }
-}
-
-/**
- * An imported VpcNetwork
- */
-class ImportedVpcNetwork extends VpcNetworkRef {
-  /**
-   * Identifier for this VPC
-   */
-  public readonly vpcId: string;
 
   /**
-   * List of public subnets in this VPC
+   * The region where this VPC is defined
    */
-  public readonly publicSubnets: VpcSubnetRef[];
-
-  /**
-   * List of private subnets in this VPC
-   */
-  public readonly privateSubnets: VpcSubnetRef[];
-
-  /**
-   * List of isolated subnets in this VPC
-   */
-  public readonly isolatedSubnets: VpcSubnetRef[];
-
-  /**
-   * AZs for this VPC
-   */
-  public readonly availabilityZones: string[];
-
-  constructor(parent: Construct, name: string, props: VpcNetworkRefProps) {
-    super(parent, name);
-
-    this.vpcId = props.vpcId;
-    this.availabilityZones = props.availabilityZones;
-
-    // tslint:disable:max-line-length
-    const pub = new ImportSubnetGroup(props.publicSubnetIds, props.publicSubnetNames, SubnetType.Public, this.availabilityZones, 'publicSubnetIds', 'publicSubnetNames');
-    const priv = new ImportSubnetGroup(props.privateSubnetIds, props.privateSubnetNames, SubnetType.Private, this.availabilityZones, 'privateSubnetIds', 'privateSubnetNames');
-    const iso = new ImportSubnetGroup(props.isolatedSubnetIds, props.isolatedSubnetNames, SubnetType.Isolated, this.availabilityZones, 'isolatedSubnetIds', 'isolatedSubnetNames');
-    // tslint:enable:max-line-length
-
-    this.publicSubnets = pub.import(this);
-    this.privateSubnets = priv.import(this);
-    this.isolatedSubnets = iso.import(this);
+  public get vpcRegion(): string {
+    return this.node.stack.region;
   }
+
 }
 
 /**
  * Properties that reference an external VpcNetwork
  */
-export interface VpcNetworkRefProps {
+export interface VpcNetworkImportProps {
   /**
    * VPC's identifier
    */
@@ -281,55 +317,14 @@ export interface VpcNetworkRefProps {
    * Must be undefined or have a name for every isolated subnet group.
    */
   isolatedSubnetNames?: string[];
+
+  /**
+   * VPN gateway's identifier
+   */
+  vpnGatewayId?: string;
 }
 
-/**
- * A new or imported VPC Subnet
- */
-export abstract class VpcSubnetRef extends Construct implements IDependable {
-  public static import(parent: Construct, name: string, props: VpcSubnetRefProps): VpcSubnetRef {
-    return new ImportedVpcSubnet(parent, name, props);
-  }
-
-  /**
-   * The Availability Zone the subnet is located in
-   */
-  public abstract readonly availabilityZone: string;
-
-  /**
-   * The subnetId for this particular subnet
-   */
-  public abstract readonly subnetId: string;
-
-  /**
-   * Parts of this VPC subnet
-   */
-  public readonly dependencyElements: IDependable[] = [];
-}
-
-/**
- * Subnet of an imported VPC
- */
-class ImportedVpcSubnet extends VpcSubnetRef {
-  /**
-   * The Availability Zone the subnet is located in
-   */
-  public readonly availabilityZone: string;
-
-  /**
-   * The subnetId for this particular subnet
-   */
-  public readonly subnetId: string;
-
-  constructor(parent: Construct, name: string, props: VpcSubnetRefProps) {
-    super(parent, name);
-
-    this.availabilityZone = props.availabilityZone;
-    this.subnetId = props.subnetId;
-  }
-}
-
-export interface VpcSubnetRefProps {
+export interface VpcSubnetImportProps {
   /**
    * The Availability Zone the subnet is located in
    */

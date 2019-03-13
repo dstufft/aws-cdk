@@ -1,6 +1,7 @@
-import { AwsAccountId, AwsPartition, Token } from '@aws-cdk/cdk';
+import cdk = require('@aws-cdk/cdk');
+import { Default, RegionInfo } from '@aws-cdk/region-info';
 
-export class PolicyDocument extends Token {
+export class PolicyDocument extends cdk.Token {
   private statements = new Array<PolicyStatement>();
 
   /**
@@ -12,7 +13,7 @@ export class PolicyDocument extends Token {
     super();
   }
 
-  public resolve(): any {
+  public resolve(_context: cdk.ResolveContext): any {
     if (this.isEmpty) {
       return undefined;
     }
@@ -49,7 +50,7 @@ export abstract class PolicyPrincipal {
   /**
    * When this Principal is used in an AssumeRole policy, the action to use.
    */
-  public readonly assumeRoleAction: string = 'sts:AssumeRole';
+  public assumeRoleAction: string = 'sts:AssumeRole';
 
   /**
    * Return the policy fragment that identifies this principal in a Policy.
@@ -65,8 +66,8 @@ export abstract class PolicyPrincipal {
  */
 export class PrincipalPolicyFragment {
   constructor(
-    public readonly principalJson: { [key: string]: any },
-    public readonly conditions: {[key: string]: any} = {}) {
+    public readonly principalJson: { [key: string]: string[] },
+    public readonly conditions: { [key: string]: any } = { }) {
   }
 }
 
@@ -76,13 +77,13 @@ export class ArnPrincipal extends PolicyPrincipal {
   }
 
   public policyFragment(): PrincipalPolicyFragment {
-    return new PrincipalPolicyFragment({ AWS: this.arn });
+    return new PrincipalPolicyFragment({ AWS: [ this.arn ] });
   }
 }
 
 export class AccountPrincipal extends ArnPrincipal {
   constructor(public readonly accountId: any) {
-    super(`arn:${new AwsPartition()}:iam::${accountId}:root`);
+    super(new StackDependentToken(stack => `arn:${stack.partition}:iam::${accountId}:root`).toString());
   }
 }
 
@@ -90,12 +91,16 @@ export class AccountPrincipal extends ArnPrincipal {
  * An IAM principal that represents an AWS service (i.e. sqs.amazonaws.com).
  */
 export class ServicePrincipal extends PolicyPrincipal {
-  constructor(public readonly service: string) {
+  constructor(public readonly service: string, private readonly opts: ServicePrincipalOpts = {}) {
     super();
   }
 
   public policyFragment(): PrincipalPolicyFragment {
-    return new PrincipalPolicyFragment({ Service: this.service });
+    return new PrincipalPolicyFragment({
+      Service: [
+        new ServicePrincipalToken(this.service, this.opts).toString()
+      ]
+    });
   }
 }
 
@@ -113,47 +118,95 @@ export class ServicePrincipal extends PolicyPrincipal {
  *
  */
 export class CanonicalUserPrincipal extends PolicyPrincipal {
-  constructor(public readonly canonicalUserId: any) {
+  constructor(public readonly canonicalUserId: string) {
     super();
   }
 
   public policyFragment(): PrincipalPolicyFragment {
-    return new PrincipalPolicyFragment({ CanonicalUser: this.canonicalUserId });
+    return new PrincipalPolicyFragment({ CanonicalUser: [ this.canonicalUserId ] });
   }
 }
 
 export class FederatedPrincipal extends PolicyPrincipal {
   constructor(
-    public readonly federated: any,
+    public readonly federated: string,
     public readonly conditions: {[key: string]: any},
-    public readonly assumeRoleAction: string = 'sts:AssumeRole') {
+    public assumeRoleAction: string = 'sts:AssumeRole') {
     super();
   }
 
   public policyFragment(): PrincipalPolicyFragment {
-    return new PrincipalPolicyFragment({ Federated: this.federated }, this.conditions);
+    return new PrincipalPolicyFragment({ Federated: [ this.federated ] }, this.conditions);
   }
 }
 
 export class AccountRootPrincipal extends AccountPrincipal {
   constructor() {
-    super(new AwsAccountId());
+    super(new StackDependentToken(stack => stack.accountId).toString());
   }
 }
 
 /**
  * A principal representing all identities in all accounts
  */
-export class Anyone extends ArnPrincipal {
+export class AnyPrincipal extends ArnPrincipal {
   constructor() {
     super('*');
   }
 }
 
 /**
+ * A principal representing all identities in all accounts
+ * @deprecated use `AnyPrincipal`
+ */
+export class Anyone extends AnyPrincipal { }
+
+export class CompositePrincipal extends PolicyPrincipal {
+  private readonly principals = new Array<PolicyPrincipal>();
+
+  constructor(principal: PolicyPrincipal, ...additionalPrincipals: PolicyPrincipal[]) {
+    super();
+    this.assumeRoleAction = principal.assumeRoleAction;
+    this.addPrincipals(principal);
+    this.addPrincipals(...additionalPrincipals);
+  }
+
+  public addPrincipals(...principals: PolicyPrincipal[]): this {
+    for (const p of principals) {
+      if (p.assumeRoleAction !== this.assumeRoleAction) {
+        throw new Error(
+          `Cannot add multiple principals with different "assumeRoleAction". ` +
+          `Expecting "${this.assumeRoleAction}", got "${p.assumeRoleAction}"`);
+      }
+
+      const fragment = p.policyFragment();
+      if (fragment.conditions && Object.keys(fragment.conditions).length > 0) {
+        throw new Error(
+          `Components of a CompositePrincipal must not have conditions. ` +
+          `Tried to add the following fragment: ${JSON.stringify(fragment)}`);
+      }
+
+      this.principals.push(p);
+    }
+
+    return this;
+  }
+
+  public policyFragment(): PrincipalPolicyFragment {
+    const principalJson: { [key: string]: string[] } = { };
+
+    for (const p of this.principals) {
+      mergePrincipal(principalJson, p.policyFragment().principalJson);
+    }
+
+    return new PrincipalPolicyFragment(principalJson);
+  }
+}
+
+/**
  * Represents a statement in an IAM policy document.
  */
-export class PolicyStatement extends Token {
+export class PolicyStatement extends cdk.Token {
   private action = new Array<any>();
   private principal: { [key: string]: any[] } = {};
   private resource = new Array<any>();
@@ -191,42 +244,49 @@ export class PolicyStatement extends Token {
     return Object.keys(this.principal).length > 0;
   }
 
-  public addPrincipal(principal: PolicyPrincipal): PolicyStatement {
+  public addPrincipal(principal: PolicyPrincipal): this {
     const fragment = principal.policyFragment();
-    for (const key of Object.keys(fragment.principalJson)) {
-      if (Object.keys(this.principal).length > 0 && !(key in this.principal)) {
-        throw new Error(`Attempted to add principal key ${key} in principal of type ${Object.keys(this.principal)[0]}`);
-      }
-      this.principal[key] = this.principal[key] || [];
-      const value = fragment.principalJson[key];
-      if (Array.isArray(value)) {
-        this.principal[key].push(...value);
-      } else {
-        this.principal[key].push(value);
-      }
-    }
+    mergePrincipal(this.principal, fragment.principalJson);
     this.addConditions(fragment.conditions);
     return this;
   }
 
-  public addAwsPrincipal(arn: string): PolicyStatement {
+  public addAwsPrincipal(arn: string): this {
     return this.addPrincipal(new ArnPrincipal(arn));
   }
 
-  public addAwsAccountPrincipal(accountId: string): PolicyStatement {
+  public addAwsAccountPrincipal(accountId: string): this {
     return this.addPrincipal(new AccountPrincipal(accountId));
   }
 
-  public addServicePrincipal(service: string): PolicyStatement {
-    return this.addPrincipal(new ServicePrincipal(service));
+  public addArnPrincipal(arn: string): this {
+    return this.addAwsPrincipal(arn);
   }
 
-  public addFederatedPrincipal(federated: any, conditions: {[key: string]: any}): PolicyStatement {
+  /**
+   * Adds a service principal to this policy statement.
+   *
+   * @param service the service name for which a service principal is requested (e.g: `s3.amazonaws.com`).
+   * @param region  the region in which the service principal lives (defaults to the current stack's region).
+   */
+  public addServicePrincipal(service: string, opts?: ServicePrincipalOpts): this {
+    return this.addPrincipal(new ServicePrincipal(service, opts));
+  }
+
+  public addFederatedPrincipal(federated: any, conditions: {[key: string]: any}): this {
     return this.addPrincipal(new FederatedPrincipal(federated, conditions));
   }
 
-  public addAccountRootPrincipal(): PolicyStatement {
+  public addAccountRootPrincipal(): this {
     return this.addPrincipal(new AccountRootPrincipal());
+  }
+
+  public addCanonicalUserPrincipal(canonicalUserId: string): this {
+    return this.addPrincipal(new CanonicalUserPrincipal(canonicalUserId));
+  }
+
+  public addAnyPrincipal(): this {
+    return this.addPrincipal(new Anyone());
   }
 
   //
@@ -314,7 +374,7 @@ export class PolicyStatement extends Token {
   }
 
   public limitToAccount(accountId: string): PolicyStatement {
-    return this.addCondition('StringEquals', new Token(() => {
+    return this.addCondition('StringEquals', new cdk.Token(() => {
       return { 'sts:ExternalId': accountId };
     }));
   }
@@ -322,8 +382,7 @@ export class PolicyStatement extends Token {
   //
   // Serialization
   //
-
-  public resolve(): any {
+  public resolve(_context: cdk.ResolveContext): any {
     return this.toJson();
   }
 
@@ -385,4 +444,57 @@ export class PolicyStatement extends Token {
 export enum PolicyStatementEffect {
   Allow = 'Allow',
   Deny = 'Deny',
+}
+
+function mergePrincipal(target: { [key: string]: string[] }, source: { [key: string]: string[] }) {
+  for (const key of Object.keys(source)) {
+    target[key] = target[key] || [];
+
+    const value = source[key];
+    if (!Array.isArray(value)) {
+      throw new Error(`Principal value must be an array (it will be normalized later): ${value}`);
+    }
+
+    target[key].push(...value);
+  }
+
+  return target;
+}
+
+/**
+ * A lazy token that requires an instance of Stack to evaluate
+ */
+class StackDependentToken extends cdk.Token {
+  constructor(private readonly fn: (stack: cdk.Stack) => any) {
+    super();
+  }
+
+  public resolve(context: cdk.ResolveContext) {
+    return this.fn(context.scope.node.stack);
+  }
+}
+
+class ServicePrincipalToken extends cdk.Token {
+  constructor(private readonly service: string,
+              private readonly opts: ServicePrincipalOpts) {
+    super();
+  }
+
+  public resolve(ctx: cdk.ResolveContext) {
+    const region = this.opts.region || ctx.scope.node.stack.region;
+    const fact = RegionInfo.get(region).servicePrincipal(this.service);
+    return fact || Default.servicePrincipal(this.service, region, ctx.scope.node.stack.urlSuffix);
+  }
+}
+
+/**
+ * Options for a service principal.
+ */
+export interface ServicePrincipalOpts {
+  /**
+   * The region in which the service is operating.
+   *
+   * @default the current Stack's region.
+   */
+  region?: string;
 }

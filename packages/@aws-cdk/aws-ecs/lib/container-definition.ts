@@ -1,15 +1,12 @@
 import iam = require('@aws-cdk/aws-iam');
 import cdk = require('@aws-cdk/cdk');
 import { NetworkMode, TaskDefinition } from './base/task-definition';
-import { IContainerImage } from './container-image';
-import { cloudformation } from './ecs.generated';
+import { ContainerImage } from './container-image';
+import { CfnTaskDefinition } from './ecs.generated';
 import { LinuxParameters } from './linux-parameters';
 import { LogDriver } from './log-drivers/log-driver';
 
-/**
- * Properties of a container definition
- */
-export interface ContainerDefinitionProps {
+export interface ContainerDefinitionOptions {
   /**
    * The image to use for a container.
    *
@@ -17,7 +14,7 @@ export interface ContainerDefinitionProps {
    * repositories (repository-url/image:tag).
    * TODO: Update these to specify using classes of IContainerImage
    */
-  image: IContainerImage;
+  image: ContainerImage;
 
   /**
    * The CMD value to pass to the container.
@@ -59,7 +56,7 @@ export interface ContainerDefinitionProps {
    *
    * @default No labels
    */
-  dockerLabels?: {[key: string]: string };
+  dockerLabels?: { [key: string]: string };
 
   /**
    * A list of custom labels for SELinux and AppArmor multi-level security systems.
@@ -81,7 +78,7 @@ export interface ContainerDefinitionProps {
    *
    * @default No environment variables
    */
-  environment?: {[key: string]: string};
+  environment?: { [key: string]: string };
 
   /**
    * Indicates whether the task stops if this container fails.
@@ -101,7 +98,7 @@ export interface ContainerDefinitionProps {
    *
    * @default No extra hosts
    */
-  extraHosts?: {[name: string]: string};
+  extraHosts?: { [name: string]: string };
 
   /**
    * Container health check.
@@ -174,6 +171,16 @@ export interface ContainerDefinitionProps {
 }
 
 /**
+ * Properties of a container definition
+ */
+export interface ContainerDefinitionProps extends ContainerDefinitionOptions {
+  /**
+   * The task this container definition belongs to.
+   */
+  taskDefinition: TaskDefinition;
+}
+
+/**
  * A definition for a single container in a Task
  */
 export class ContainerDefinition extends cdk.Construct {
@@ -222,13 +229,15 @@ export class ContainerDefinition extends cdk.Construct {
    */
   private readonly links = new Array<string>();
 
-  constructor(parent: cdk.Construct, id: string, taskDefinition: TaskDefinition, private readonly props: ContainerDefinitionProps) {
-    super(parent, id);
+  constructor(scope: cdk.Construct, id: string, private readonly props: ContainerDefinitionProps) {
+    super(scope, id);
     this.essential = props.essential !== undefined ? props.essential : true;
-    this.taskDefinition = taskDefinition;
+    this.taskDefinition = props.taskDefinition;
     this.memoryLimitSpecified = props.memoryLimitMiB !== undefined || props.memoryReservationMiB !== undefined;
 
     props.image.bind(this);
+    if (props.logging) { props.logging.bind(this); }
+    props.taskDefinition._linkContainer(this);
   }
 
   /**
@@ -242,9 +251,9 @@ export class ContainerDefinition extends cdk.Construct {
       throw new Error(`You must use network mode Bridge to add container links.`);
     }
     if (alias !== undefined) {
-      this.links.push(`${container.id}:${alias}`);
+      this.links.push(`${container.node.id}:${alias}`);
     } else {
-      this.links.push(`${container.id}`);
+      this.links.push(`${container.node.id}`);
     }
   }
 
@@ -322,7 +331,7 @@ export class ContainerDefinition extends cdk.Construct {
    */
   public get ingressPort(): number {
     if (this.portMappings.length === 0) {
-      throw new Error(`Container ${this.id} hasn't defined any ports. Call addPortMappings().`);
+      throw new Error(`Container ${this.node.id} hasn't defined any ports. Call addPortMappings().`);
     }
     const defaultPortMapping = this.portMappings[0];
 
@@ -341,7 +350,7 @@ export class ContainerDefinition extends cdk.Construct {
    */
   public get containerPort(): number {
     if (this.portMappings.length === 0) {
-      throw new Error(`Container ${this.id} hasn't defined any ports. Call addPortMappings().`);
+      throw new Error(`Container ${this.node.id} hasn't defined any ports. Call addPortMappings().`);
     }
     const defaultPortMapping = this.portMappings[0];
     return defaultPortMapping.containerPort;
@@ -350,7 +359,7 @@ export class ContainerDefinition extends cdk.Construct {
   /**
    * Render this container definition to a CloudFormation object
    */
-  public renderContainerDefinition(): cloudformation.TaskDefinitionResource.ContainerDefinitionProperty {
+  public renderContainerDefinition(): CfnTaskDefinition.ContainerDefinitionProperty {
     return {
       command: this.props.command,
       cpu: this.props.cpu,
@@ -366,7 +375,7 @@ export class ContainerDefinition extends cdk.Construct {
       memory: this.props.memoryLimitMiB,
       memoryReservation: this.props.memoryReservationMiB,
       mountPoints: this.mountPoints.map(renderMountPoint),
-      name: this.id,
+      name: this.node.id,
       portMappings: this.portMappings.map(renderPortMapping),
       privileged: this.props.privileged,
       readonlyRootFilesystem: this.props.readonlyRootFilesystem,
@@ -433,7 +442,7 @@ export interface HealthCheck {
   timeout?: number;
 }
 
-function renderKV(env: {[key: string]: string}, keyName: string, valueName: string): any {
+function renderKV(env: { [key: string]: string }, keyName: string, valueName: string): any {
   const ret = [];
   for (const [key, value] of Object.entries(env)) {
     ret.push({ [keyName]: key, [valueName]: value });
@@ -441,7 +450,7 @@ function renderKV(env: {[key: string]: string}, keyName: string, valueName: stri
   return ret;
 }
 
-function renderHealthCheck(hc: HealthCheck): cloudformation.TaskDefinitionResource.HealthCheckProperty {
+function renderHealthCheck(hc: HealthCheck): CfnTaskDefinition.HealthCheckProperty {
   return {
     command: getHealthCheckCommand(hc),
     interval: hc.intervalSeconds !== undefined ? hc.intervalSeconds : 30,
@@ -516,7 +525,7 @@ export enum UlimitName {
   Stack = "stack"
 }
 
-function renderUlimit(ulimit: Ulimit): cloudformation.TaskDefinitionResource.UlimitProperty {
+function renderUlimit(ulimit: Ulimit): CfnTaskDefinition.UlimitProperty {
   return {
     name: ulimit.name,
     softLimit: ulimit.softLimit,
@@ -567,7 +576,7 @@ export enum Protocol {
   Udp = "udp",
 }
 
-function renderPortMapping(pm: PortMapping): cloudformation.TaskDefinitionResource.PortMappingProperty {
+function renderPortMapping(pm: PortMapping): CfnTaskDefinition.PortMappingProperty {
   return {
     containerPort: pm.containerPort,
     hostPort: pm.hostPort,
@@ -576,19 +585,19 @@ function renderPortMapping(pm: PortMapping): cloudformation.TaskDefinitionResour
 }
 
 export interface ScratchSpace {
-    containerPath: string,
-    readOnly: boolean,
-    sourcePath: string
-    name: string,
+  containerPath: string,
+  readOnly: boolean,
+  sourcePath: string
+  name: string,
 }
 
 export interface MountPoint {
-    containerPath: string,
-    readOnly: boolean,
-    sourceVolume: string,
+  containerPath: string,
+  readOnly: boolean,
+  sourceVolume: string,
 }
 
-function renderMountPoint(mp: MountPoint): cloudformation.TaskDefinitionResource.MountPointProperty {
+function renderMountPoint(mp: MountPoint): CfnTaskDefinition.MountPointProperty {
   return {
     containerPath: mp.containerPath,
     readOnly: mp.readOnly,
@@ -611,7 +620,7 @@ export interface VolumeFrom {
   readOnly: boolean,
 }
 
-function renderVolumeFrom(vf: VolumeFrom): cloudformation.TaskDefinitionResource.VolumeFromProperty {
+function renderVolumeFrom(vf: VolumeFrom): CfnTaskDefinition.VolumeFromProperty {
   return {
     sourceContainer: vf.sourceContainer,
     readOnly: vf.readOnly,

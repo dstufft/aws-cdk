@@ -28,11 +28,6 @@ export class RuntimeValue extends cdk.Construct {
   public static readonly ENV_NAME = 'RTV_STACK_NAME';
 
   /**
-   * The value to assign to the `RTV_STACK_NAME` environment variable.
-   */
-  public static readonly ENV_VALUE = new cdk.AwsStackName();
-
-  /**
    * IAM actions needed to read a value from an SSM parameter.
    */
   private static readonly SSM_READ_ACTIONS = [
@@ -40,6 +35,11 @@ export class RuntimeValue extends cdk.Construct {
     'ssm:GetParameters',
     'ssm:GetParameter'
   ];
+
+  /**
+   * The value to assign to the `RTV_STACK_NAME` environment variable.
+   */
+  public readonly envValue: string;
 
   /**
    * The name of the runtime parameter.
@@ -51,18 +51,19 @@ export class RuntimeValue extends cdk.Construct {
    */
   public readonly parameterArn: string;
 
-  constructor(parent: cdk.Construct, name: string, props: RuntimeValueProps) {
-    super(parent, name);
+  constructor(scope: cdk.Construct, id: string, props: RuntimeValueProps) {
+    super(scope, id);
 
-    this.parameterName = `/rtv/${new cdk.AwsStackName()}/${props.package}/${name}`;
+    this.parameterName = `/rtv/${this.node.stack.stackName}/${props.package}/${id}`;
+    this.envValue = this.node.stack.stackName;
 
-    new ssm.cloudformation.ParameterResource(this, 'Parameter', {
+    new ssm.CfnParameter(this, 'Parameter', {
       name: this.parameterName,
       type: 'String',
       value: props.value,
     });
 
-    this.parameterArn = cdk.ArnUtils.fromComponents({
+    this.parameterArn = this.node.stack.formatArn({
       service: 'ssm',
       resource: 'parameter',
       resourceName: this.parameterName

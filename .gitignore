@@ -1,4 +1,6 @@
 .vscode
+# VSCode extension
+/.favorites.json
 .DS_Store
 node_modules
 lerna-debug.log
@@ -12,6 +14,9 @@ coverage
 .LAST_BUILD
 __pycache__
 *.swp
+*.sw[a-z]
+*~
 
 # we don't want tsconfig at the root
 /tsconfig.json
+cdk.context.json

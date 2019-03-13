@@ -1,7 +1,8 @@
-import { expect, haveResource } from '@aws-cdk/assert';
+import { expect, haveResource, haveResourceLike } from '@aws-cdk/assert';
 import cloudformation = require('@aws-cdk/aws-cloudformation');
 import codebuild = require('@aws-cdk/aws-codebuild');
 import codecommit = require('@aws-cdk/aws-codecommit');
+import cpapi = require('@aws-cdk/aws-codepipeline-api');
 import lambda = require('@aws-cdk/aws-lambda');
 import s3 = require('@aws-cdk/aws-s3');
 import sns = require('@aws-cdk/aws-sns');
@@ -20,25 +21,48 @@ export = {
     });
 
     const pipeline = new codepipeline.Pipeline(stack, 'Pipeline');
-    const sourceStage = new codepipeline.Stage(pipeline, 'source', { pipeline });
-    const source = new codecommit.PipelineSourceAction(stack, 'source', {
-      stage: sourceStage,
+    const source = new codecommit.PipelineSourceAction({
+      actionName: 'source',
       outputArtifactName: 'SourceArtifact',
       repository,
     });
+    pipeline.addStage({
+      name: 'source',
+      actions: [source],
+    });
 
-    const buildStage = new codepipeline.Stage(pipeline, 'build', { pipeline });
     const project = new codebuild.Project(stack, 'MyBuildProject', {
        source: new codebuild.CodePipelineSource()
     });
-    new codebuild.PipelineBuildAction(stack, 'build', {
-      stage: buildStage,
-      inputArtifact: source.outputArtifact,
-      project,
+    pipeline.addStage({
+      name: 'build',
+      actions: [
+        new codebuild.PipelineBuildAction({
+          actionName: 'build',
+          inputArtifact: source.outputArtifact,
+          project,
+        }),
+      ],
     });
 
     test.notDeepEqual(stack.toCloudFormation(), {});
-    test.deepEqual([], pipeline.validate());
+    test.deepEqual([], pipeline.node.validateTree());
+    test.done();
+  },
+
+  'Tokens can be used as physical names of the Pipeline'(test: Test) {
+    const stack = new cdk.Stack(undefined, 'StackName');
+
+    new codepipeline.Pipeline(stack, 'Pipeline', {
+      pipelineName: stack.stackName,
+    });
+
+    expect(stack, true).to(haveResourceLike('AWS::CodePipeline::Pipeline', {
+      "Name": {
+        "Ref": "AWS::StackName",
+      },
+    }));
+
     test.done();
   },
 
@@ -49,21 +73,29 @@ export = {
 
     const p = new codepipeline.Pipeline(stack, 'P');
 
-    const s1 = new codepipeline.Stage(stack, 'Source', { pipeline: p });
-    new codepipeline.GitHubSourceAction(stack, 'GH', {
-      stage: s1,
-      runOrder: 8,
-      outputArtifactName: 'A',
-      branch: 'branch',
-      oauthToken: secret.value,
-      owner: 'foo',
-      repo: 'bar'
+    p.addStage({
+      name: 'Source',
+      actions: [
+        new codepipeline.GitHubSourceAction({
+          actionName: 'GH',
+          runOrder: 8,
+          outputArtifactName: 'A',
+          branch: 'branch',
+          oauthToken: secret.value,
+          owner: 'foo',
+          repo: 'bar'
+        }),
+      ],
     });
 
-    const s2 = new codepipeline.Stage(stack, 'Two', { pipeline: p });
-    new codepipeline.ManualApprovalAction(stack, 'Boo', { stage: s2 });
+    p.addStage({
+      name: 'Two',
+      actions: [
+        new codepipeline.ManualApprovalAction({ actionName: 'Boo' }),
+      ],
+    });
 
-    expect(stack).to(haveResource('AWS::CodePipeline::Pipeline', {
+    expect(stack).to(haveResourceLike('AWS::CodePipeline::Pipeline', {
       "ArtifactStore": {
       "Location": {
         "Ref": "PArtifactsBucket5E711C12"
@@ -93,7 +125,7 @@ export = {
           "OAuthToken": {
             "Ref": "GitHubTokenParameterBB166B9D"
           },
-          "PollForSourceChanges": true
+          "PollForSourceChanges": false
           },
           "InputArtifacts": [],
           "Name": "GH",
@@ -127,7 +159,7 @@ export = {
       ]
     }));
 
-    test.deepEqual([], p.validate());
+    test.deepEqual([], p.node.validateTree());
     test.done();
   },
 
@@ -138,16 +170,24 @@ export = {
 
     const pipeline = new codepipeline.Pipeline(stack, 'PL');
 
-    const stage1 = new codepipeline.Stage(stack, 'S1', { pipeline });
-    new s3.PipelineSourceAction(stack, 'A1', {
-      stage: stage1,
-      outputArtifactName: 'Artifact',
-      bucket: new s3.Bucket(stack, 'Bucket'),
-      bucketKey: 'Key'
+    pipeline.addStage({
+      name: 'S1',
+      actions: [
+        new s3.PipelineSourceAction({
+          actionName: 'A1',
+          outputArtifactName: 'Artifact',
+          bucket: new s3.Bucket(stack, 'Bucket'),
+          bucketKey: 'Key'
+        }),
+      ],
     });
 
-    const stage2 = new codepipeline.Stage(stack, 'S2', { pipeline });
-    new codepipeline.ManualApprovalAction(stack, 'A2', { stage: stage2 });
+    pipeline.addStage({
+      name: 'S2',
+      actions: [
+        new codepipeline.ManualApprovalAction({ actionName: 'A2' }),
+      ],
+    });
 
     pipeline.onStateChange('OnStateChange', topic, {
       description: 'desc',
@@ -211,8 +251,24 @@ export = {
       ]
     }));
 
-    test.deepEqual([], pipeline.validate());
+    test.deepEqual([], pipeline.node.validateTree());
     test.done();
+  },
+
+  'manual approval Action': {
+    'allows passing an SNS Topic when constructing it'(test: Test) {
+      const stack = new cdk.Stack();
+      const topic = new sns.Topic(stack, 'Topic');
+      const manualApprovalAction = new codepipeline.ManualApprovalAction({
+        actionName: 'Approve',
+        notificationTopic: topic,
+      });
+      stageForTesting(stack).addAction(manualApprovalAction);
+
+      test.equal(manualApprovalAction.notificationTopic, topic);
+
+      test.done();
+    },
   },
 
   'PipelineProject': {
@@ -224,7 +280,7 @@ export = {
           projectName: 'MyProject',
         });
 
-        expect(stack).to(haveResource('AWS::CodeBuild::Project', {
+        expect(stack).to(haveResourceLike('AWS::CodeBuild::Project', {
           "Name": "MyProject",
           "Source": {
           "Type": "CODEPIPELINE"
@@ -262,15 +318,45 @@ export = {
 
     const pipeline = new codepipeline.Pipeline(stack, 'Pipeline');
 
-    // first stage must contain a Source action so we can't use it to test Lambda
-    const stage = new codepipeline.Stage(stack, 'Stage', { pipeline });
-    new lambda.PipelineInvokeAction(stack, 'InvokeAction', {
-      stage,
-      lambda: lambdaFun,
-      userParameters: 'foo-bar/42'
+    const bucket = new s3.Bucket(stack, 'Bucket');
+    const source1 = bucket.toCodePipelineSourceAction({
+      actionName: 'SourceAction1',
+      bucketKey: 'some/key',
+      outputArtifactName: 'sourceArtifact1',
+    });
+    const source2 = bucket.toCodePipelineSourceAction({
+      actionName: 'SourceAction2',
+      bucketKey: 'another/key',
+      outputArtifactName: 'sourceArtifact2',
+    });
+    pipeline.addStage({
+      name: 'Source',
+      actions: [
+        source1,
+        source2,
+      ],
     });
 
-    expect(stack, /* skip validation */ true).to(haveResource('AWS::CodePipeline::Pipeline', {
+    const lambdaAction = new lambda.PipelineInvokeAction({
+      actionName: 'InvokeAction',
+      lambda: lambdaFun,
+      userParameters: 'foo-bar/42',
+      inputArtifacts: [
+          source2.outputArtifact,
+          source1.outputArtifact,
+      ],
+      outputArtifactNames: [
+          'lambdaOutput1',
+          'lambdaOutput2',
+          'lambdaOutput3',
+      ],
+    });
+    pipeline.addStage({
+      name: 'Stage',
+      actions: [lambdaAction],
+    });
+
+    expect(stack).to(haveResourceLike('AWS::CodePipeline::Pipeline', {
       "ArtifactStore": {
         "Location": {
         "Ref": "PipelineArtifactsBucket22248F97"
@@ -284,6 +370,9 @@ export = {
         ]
       },
       "Stages": [
+        {
+          "Name": "Source",
+        },
         {
         "Actions": [
           {
@@ -299,9 +388,16 @@ export = {
             },
             "UserParameters": "foo-bar/42"
           },
-          "InputArtifacts": [],
+          "InputArtifacts": [
+            { "Name": "sourceArtifact2" },
+            { "Name": "sourceArtifact1" },
+          ],
           "Name": "InvokeAction",
-          "OutputArtifacts": [],
+          "OutputArtifacts": [
+            { "Name": "lambdaOutput1" },
+            { "Name": "lambdaOutput2" },
+            { "Name": "lambdaOutput3" },
+          ],
           "RunOrder": 1
           }
         ],
@@ -309,6 +405,9 @@ export = {
         }
       ]
     }));
+
+    test.equal(lambdaAction.outputArtifacts().length, 3);
+    test.notEqual(lambdaAction.outputArtifact('lambdaOutput2'), undefined);
 
     expect(stack, /* skip validation */ true).to(haveResource('AWS::IAM::Policy', {
       "PolicyDocument": {
@@ -338,8 +437,8 @@ export = {
   'CodeCommit Action': {
     'does not poll for changes by default'(test: Test) {
       const stack = new cdk.Stack();
-      const sourceAction = new codecommit.PipelineSourceAction(stack, 'stage', {
-        stage: stageForTesting(stack),
+      const sourceAction = new codecommit.PipelineSourceAction({
+        actionName: 'stage',
         outputArtifactName: 'SomeArtifact',
         repository: repositoryForTesting(stack),
       });
@@ -351,8 +450,8 @@ export = {
 
     'does not poll for source changes when explicitly set to false'(test: Test) {
       const stack = new cdk.Stack();
-      const sourceAction = new codecommit.PipelineSourceAction(stack, 'stage', {
-        stage: stageForTesting(stack),
+      const sourceAction = new codecommit.PipelineSourceAction({
+        actionName: 'stage',
         outputArtifactName: 'SomeArtifact',
         repository: repositoryForTesting(stack),
         pollForSourceChanges: false,
@@ -369,7 +468,9 @@ export = {
       const pipelineRegion = 'us-west-2';
       const pipelineAccount = '123';
 
-      const stack = new cdk.Stack(undefined, undefined, {
+      const app = new cdk.App();
+
+      const stack = new cdk.Stack(app, 'TestStack', {
         env: {
           region: pipelineRegion,
           account: pipelineAccount,
@@ -382,33 +483,43 @@ export = {
         },
       });
 
-      const stage1 = pipeline.addStage('Stage1');
-      const sourceAction = bucket.addToPipeline(stage1, 'BucketSource', {
+      const sourceAction = bucket.toCodePipelineSourceAction({
+        actionName: 'BucketSource',
         bucketKey: '/some/key',
       });
-
-      const stage2 = pipeline.addStage('Stage2');
-      new cloudformation.PipelineCreateReplaceChangeSetAction(stack, 'Action1', {
-        stage: stage2,
-        changeSetName: 'ChangeSet',
-        templatePath: sourceAction.outputArtifact.atPath('template.yaml'),
-        stackName: 'SomeStack',
-        region: pipelineRegion,
-      });
-      new cloudformation.PipelineCreateUpdateStackAction(stack, 'Action2', {
-        stage: stage2,
-        templatePath: sourceAction.outputArtifact.atPath('template.yaml'),
-        stackName: 'OtherStack',
-        region: 'us-east-1',
-      });
-      new cloudformation.PipelineExecuteChangeSetAction(stack, 'Action3', {
-        stage: stage2,
-        changeSetName: 'ChangeSet',
-        stackName: 'SomeStack',
-        region: 'us-west-1',
+      pipeline.addStage({
+        name: 'Stage1',
+        actions: [sourceAction],
       });
 
-      expect(stack).to(haveResource('AWS::CodePipeline::Pipeline', {
+      pipeline.addStage({
+        name: 'Stage2',
+        actions: [
+          new cloudformation.PipelineCreateReplaceChangeSetAction({
+            actionName: 'Action1',
+            changeSetName: 'ChangeSet',
+            templatePath: sourceAction.outputArtifact.atPath('template.yaml'),
+            stackName: 'SomeStack',
+            region: pipelineRegion,
+            adminPermissions: false,
+          }),
+          new cloudformation.PipelineCreateUpdateStackAction({
+            actionName: 'Action2',
+            templatePath: sourceAction.outputArtifact.atPath('template.yaml'),
+            stackName: 'OtherStack',
+            region: 'us-east-1',
+            adminPermissions: false,
+          }),
+          new cloudformation.PipelineExecuteChangeSetAction({
+            actionName: 'Action3',
+            changeSetName: 'ChangeSet',
+            stackName: 'SomeStack',
+            region: 'us-west-1',
+          }),
+        ],
+      });
+
+      expect(stack).to(haveResourceLike('AWS::CodePipeline::Pipeline', {
         "ArtifactStores": [
           {
             "Region": "us-east-1",
@@ -461,17 +572,17 @@ export = {
       test.notEqual(usEast1ScaffoldStack, undefined);
       test.equal(usEast1ScaffoldStack.env.region, 'us-east-1');
       test.equal(usEast1ScaffoldStack.env.account, pipelineAccount);
-      test.ok(usEast1ScaffoldStack.id.indexOf('us-east-1') !== -1,
-        `expected '${usEast1ScaffoldStack.id}' to contain 'us-east-1'`);
+      test.ok(usEast1ScaffoldStack.node.id.indexOf('us-east-1') !== -1,
+        `expected '${usEast1ScaffoldStack.node.id}' to contain 'us-east-1'`);
 
       test.done();
     },
   },
 };
 
-function stageForTesting(stack: cdk.Stack): codepipeline.Stage {
+function stageForTesting(stack: cdk.Stack): cpapi.IStage {
   const pipeline = new codepipeline.Pipeline(stack, 'pipeline');
-  return new codepipeline.Stage(pipeline, 'stage', { pipeline });
+  return pipeline.addStage({ name: 'stage' });
 }
 
 function repositoryForTesting(stack: cdk.Stack): codecommit.Repository {

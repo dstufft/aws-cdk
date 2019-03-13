@@ -6,7 +6,7 @@ import iam = require('@aws-cdk/aws-iam');
 import sns = require('@aws-cdk/aws-sns');
 import cdk = require('@aws-cdk/cdk');
 
-import { cloudformation } from './autoscaling.generated';
+import { CfnAutoScalingGroup, CfnAutoScalingGroupProps, CfnLaunchConfiguration } from './autoscaling.generated';
 import { BasicLifecycleHookProps, LifecycleHook } from './lifecycle-hook';
 import { BasicScheduledActionProps, ScheduledAction } from './scheduled-action';
 import { BasicStepScalingPolicyProps, StepScalingPolicy } from './step-scaling-policy';
@@ -18,25 +18,25 @@ import { BaseTargetTrackingProps, PredefinedMetric, TargetTrackingScalingPolicy 
 const NAME_TAG: string = 'Name';
 
 /**
- * Properties of a Fleet
+ * Basic properties of an AutoScalingGroup, except the exact machines to run and where they should run
+ *
+ * Constructs that want to create AutoScalingGroups can inherit
+ * this interface and specialize the essential parts in various ways.
  */
-export interface AutoScalingGroupProps {
-  /**
-   * Type of instance to launch
-   */
-  instanceType: ec2.InstanceType;
-
+export interface CommonAutoScalingGroupProps {
   /**
    * Minimum number of instances in the fleet
+   *
    * @default 1
    */
-  minSize?: number;
+  minCapacity?: number;
 
   /**
    * Maximum number of instances in the fleet
-   * @default 1
+   *
+   * @default desiredCapacity
    */
-  maxSize?: number;
+  maxCapacity?: number;
 
   /**
    * Initial amount of instances in the fleet
@@ -51,16 +51,6 @@ export interface AutoScalingGroupProps {
   keyName?: string;
 
   /**
-   * AMI to launch
-   */
-  machineImage: ec2.IMachineImageSource;
-
-  /**
-   * VPC to launch these instances in.
-   */
-  vpc: ec2.VpcNetworkRef;
-
-  /**
    * Where to place instances within the VPC
    */
   vpcPlacement?: ec2.VpcPlacementStrategy;
@@ -69,7 +59,7 @@ export interface AutoScalingGroupProps {
    * SNS topic to send notifications about fleet changes
    * @default No fleet change notifications will be sent.
    */
-  notificationsTopic?: sns.TopicRef;
+  notificationsTopic?: sns.ITopic;
 
   /**
    * Whether the instances can initiate connections to anywhere by default
@@ -136,16 +126,54 @@ export interface AutoScalingGroupProps {
   resourceSignalTimeoutSec?: number;
 
   /**
-   * The AWS resource tags to associate with the ASG.
-   */
-  tags?: cdk.Tags;
-
-  /**
    * Default scaling cooldown for this AutoScalingGroup
    *
    * @default 300 (5 minutes)
    */
   cooldownSeconds?: number;
+
+  /**
+   * Whether instances in the Auto Scaling Group should have public
+   * IP addresses associated with them.
+   *
+   * @default Use subnet setting
+   */
+  associatePublicIpAddress?: boolean;
+}
+
+/**
+ * Properties of a Fleet
+ */
+export interface AutoScalingGroupProps extends CommonAutoScalingGroupProps {
+  /**
+   * VPC to launch these instances in.
+   */
+  vpc: ec2.IVpcNetwork;
+
+  /**
+   * Type of instance to launch
+   */
+  instanceType: ec2.InstanceType;
+
+  /**
+   * AMI to launch
+   */
+  machineImage: ec2.IMachineImageSource;
+
+  /**
+   * An IAM role to associate with the instance profile assigned to this Auto Scaling Group.
+   *
+   * The role must be assumable by the service principal `ec2.amazonaws.com`:
+   *
+   * @example
+   *
+   *    const role = new iam.Role(this, 'MyRole', {
+   *      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com')
+   *    });
+   *
+   * @default A role will automatically be created, it can be accessed via the `role` property
+   */
+  role?: iam.IRole;
 }
 
 /**
@@ -159,7 +187,7 @@ export interface AutoScalingGroupProps {
  *
  * The ASG spans all availability zones.
  */
-export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup, cdk.ITaggable, elb.ILoadBalancerTarget, ec2.IConnectable,
+export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup, elb.ILoadBalancerTarget, ec2.IConnectable,
   elbv2.IApplicationLoadBalancerTarget, elbv2.INetworkLoadBalancerTarget {
   /**
    * The type of OS instances of this fleet are running.
@@ -174,12 +202,7 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
   /**
    * The IAM role assumed by instances of this fleet.
    */
-  public readonly role: iam.Role;
-
-  /**
-   * Manage tags for this construct and children
-   */
-  public readonly tags: cdk.TagManager;
+  public readonly role: iam.IRole;
 
   /**
    * Name of the AutoScalingGroup
@@ -187,15 +210,15 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
   public readonly autoScalingGroupName: string;
 
   private readonly userDataLines = new Array<string>();
-  private readonly autoScalingGroup: cloudformation.AutoScalingGroupResource;
-  private readonly securityGroup: ec2.SecurityGroupRef;
-  private readonly securityGroups: ec2.SecurityGroupRef[] = [];
+  private readonly autoScalingGroup: CfnAutoScalingGroup;
+  private readonly securityGroup: ec2.ISecurityGroup;
+  private readonly securityGroups: ec2.ISecurityGroup[] = [];
   private readonly loadBalancerNames: string[] = [];
   private readonly targetGroupArns: string[] = [];
   private albTargetGroup?: elbv2.ApplicationTargetGroup;
 
-  constructor(parent: cdk.Construct, name: string, props: AutoScalingGroupProps) {
-    super(parent, name);
+  constructor(scope: cdk.Construct, id: string, props: AutoScalingGroupProps) {
+    super(scope, id);
 
     if (props.cooldownSeconds !== undefined && props.cooldownSeconds < 0) {
       throw new RangeError(`cooldownSeconds cannot be negative, got: ${props.cooldownSeconds}`);
@@ -207,50 +230,52 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
     });
     this.connections = new ec2.Connections({ securityGroups: [this.securityGroup] });
     this.securityGroups.push(this.securityGroup);
-    this.tags = new TagManager(this, {initialTags: props.tags});
-    this.tags.setTag(NAME_TAG, this.path, { overwrite: false });
+    this.node.apply(new cdk.Tag(NAME_TAG, this.node.path));
 
-    this.role = new iam.Role(this, 'InstanceRole', {
+    this.role = props.role || new iam.Role(this, 'InstanceRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com')
     });
 
-    const iamProfile = new iam.cloudformation.InstanceProfileResource(this, 'InstanceProfile', {
+    const iamProfile = new iam.CfnInstanceProfile(this, 'InstanceProfile', {
       roles: [ this.role.roleName ]
     });
 
     // use delayed evaluation
     const machineImage = props.machineImage.getImage(this);
-    const userDataToken = new cdk.Token(() => new cdk.FnBase64((machineImage.os.createUserData(this.userDataLines))));
+    const userDataToken = new cdk.Token(() => cdk.Fn.base64((machineImage.os.createUserData(this.userDataLines)))).toString();
     const securityGroupsToken = new cdk.Token(() => this.securityGroups.map(sg => sg.securityGroupId));
 
-    const launchConfig = new cloudformation.LaunchConfigurationResource(this, 'LaunchConfig', {
+    const launchConfig = new CfnLaunchConfiguration(this, 'LaunchConfig', {
       imageId: machineImage.imageId,
       keyName: props.keyName,
       instanceType: props.instanceType.toString(),
       securityGroups: securityGroupsToken,
       iamInstanceProfile: iamProfile.ref,
-      userData: userDataToken
+      userData: userDataToken,
+      associatePublicIpAddress: props.associatePublicIpAddress,
     });
 
-    launchConfig.addDependency(this.role);
+    launchConfig.node.addDependency(this.role);
 
-    const minSize = props.minSize !== undefined ? props.minSize : 1;
-    const maxSize = props.maxSize !== undefined ? props.maxSize : 1;
-    const desiredCapacity = props.desiredCapacity !== undefined ? props.desiredCapacity : 1;
+    const desiredCapacity =
+        (props.desiredCapacity !== undefined ? props.desiredCapacity :
+        (props.minCapacity !== undefined ? props.minCapacity :
+        (props.maxCapacity !== undefined ? props.maxCapacity : 1)));
+    const minCapacity = props.minCapacity !== undefined ? props.minCapacity : 1;
+    const maxCapacity = props.maxCapacity !== undefined ? props.maxCapacity : desiredCapacity;
 
-    if (desiredCapacity < minSize || desiredCapacity > maxSize) {
-      throw new Error(`Should have minSize (${minSize}) <= desiredCapacity (${desiredCapacity}) <= maxSize (${maxSize})`);
+    if (desiredCapacity < minCapacity || desiredCapacity > maxCapacity) {
+      throw new Error(`Should have minCapacity (${minCapacity}) <= desiredCapacity (${desiredCapacity}) <= maxCapacity (${maxCapacity})`);
     }
 
-    const asgProps: cloudformation.AutoScalingGroupResourceProps = {
+    const asgProps: CfnAutoScalingGroupProps = {
       cooldown: props.cooldownSeconds !== undefined ? `${props.cooldownSeconds}` : undefined,
-      minSize: minSize.toString(),
-      maxSize: maxSize.toString(),
+      minSize: minCapacity.toString(),
+      maxSize: maxCapacity.toString(),
       desiredCapacity: desiredCapacity.toString(),
       launchConfigurationName: launchConfig.ref,
       loadBalancerNames: new cdk.Token(() => this.loadBalancerNames.length > 0 ? this.loadBalancerNames : undefined),
       targetGroupArns: new cdk.Token(() => this.targetGroupArns.length > 0 ? this.targetGroupArns : undefined),
-      tags: this.tags,
     };
 
     if (props.notificationsTopic) {
@@ -269,7 +294,7 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
     const subnets = props.vpc.subnets(props.vpcPlacement);
     asgProps.vpcZoneIdentifier = subnets.map(n => n.subnetId);
 
-    this.autoScalingGroup = new cloudformation.AutoScalingGroupResource(this, 'ASG', asgProps);
+    this.autoScalingGroup = new CfnAutoScalingGroup(this, 'ASG', asgProps);
     this.osType = machineImage.os.type;
     this.autoScalingGroupName = this.autoScalingGroup.autoScalingGroupName;
 
@@ -280,9 +305,9 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
    * Add the security group to all instances via the launch configuration
    * security groups array.
    *
-   * @param securityGroup: The SecurityGroupRef to add
+   * @param securityGroup: The security group to add
    */
-  public addSecurityGroup(securityGroup: ec2.SecurityGroupRef): void {
+  public addSecurityGroup(securityGroup: ec2.ISecurityGroup): void {
     this.securityGroups.push(securityGroup);
   }
 
@@ -322,8 +347,8 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
   /**
    * Scale out or in based on time
    */
-  public scaleOnSchedule(id: string, props: BasicScheduledActionProps) {
-    new ScheduledAction(this, `ScheduledAction${id}`, {
+  public scaleOnSchedule(id: string, props: BasicScheduledActionProps): ScheduledAction {
+    return new ScheduledAction(this, `ScheduledAction${id}`, {
       autoScalingGroup: this,
       ...props,
     });
@@ -332,7 +357,7 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
   /**
    * Scale out or in to achieve a target CPU utilization
    */
-  public scaleOnCpuUtilization(id: string, props: CpuUtilizationScalingProps) {
+  public scaleOnCpuUtilization(id: string, props: CpuUtilizationScalingProps): TargetTrackingScalingPolicy {
     return new TargetTrackingScalingPolicy(this, `ScalingPolicy${id}`, {
       autoScalingGroup: this,
       predefinedMetric: PredefinedMetric.ASGAverageCPUUtilization,
@@ -344,7 +369,7 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
   /**
    * Scale out or in to achieve a target network ingress rate
    */
-  public scaleOnIncomingBytes(id: string, props: NetworkUtilizationScalingProps) {
+  public scaleOnIncomingBytes(id: string, props: NetworkUtilizationScalingProps): TargetTrackingScalingPolicy {
     return new TargetTrackingScalingPolicy(this, `ScalingPolicy${id}`, {
       autoScalingGroup: this,
       predefinedMetric: PredefinedMetric.ASGAverageNetworkIn,
@@ -356,7 +381,7 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
   /**
    * Scale out or in to achieve a target network egress rate
    */
-  public scaleOnOutgoingBytes(id: string, props: NetworkUtilizationScalingProps) {
+  public scaleOnOutgoingBytes(id: string, props: NetworkUtilizationScalingProps): TargetTrackingScalingPolicy {
     return new TargetTrackingScalingPolicy(this, `ScalingPolicy${id}`, {
       autoScalingGroup: this,
       predefinedMetric: PredefinedMetric.ASGAverageNetworkOut,
@@ -371,7 +396,7 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
    * The AutoScalingGroup must have been attached to an Application Load Balancer
    * in order to be able to call this.
    */
-  public scaleOnRequestCount(id: string, props: RequestCountScalingProps) {
+  public scaleOnRequestCount(id: string, props: RequestCountScalingProps): TargetTrackingScalingPolicy {
     if (this.albTargetGroup === undefined) {
       throw new Error('Attach the AutoScalingGroup to an Application Load Balancer before calling scaleOnRequestCount()');
     }
@@ -386,16 +411,15 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
       ...props
     });
 
-    // Target tracking policy can only be created after the load balancer has been
-    // attached to the targetgroup (because we need its ARN).
-    policy.addDependency(this.albTargetGroup.loadBalancerDependency());
+    policy.node.addDependency(this.albTargetGroup.loadBalancerAttached);
+    return policy;
   }
 
   /**
    * Scale out or in in order to keep a metric around a target value
    */
-  public scaleToTrackMetric(id: string, props: MetricTargetTrackingProps) {
-    new TargetTrackingScalingPolicy(this, `ScalingPolicy${id}`, {
+  public scaleToTrackMetric(id: string, props: MetricTargetTrackingProps): TargetTrackingScalingPolicy {
+    return new TargetTrackingScalingPolicy(this, `ScalingPolicy${id}`, {
       autoScalingGroup: this,
       customMetric: props.metric,
       ...props
@@ -405,7 +429,7 @@ export class AutoScalingGroup extends cdk.Construct implements IAutoScalingGroup
   /**
    * Scale out or in, in response to a metric
    */
-  public scaleOnMetric(id: string, props: BasicStepScalingPolicyProps) {
+  public scaleOnMetric(id: string, props: BasicStepScalingPolicyProps): StepScalingPolicy {
     return new StepScalingPolicy(this, id, { ...props, autoScalingGroup: this });
   }
 
@@ -610,16 +634,6 @@ function renderRollingUpdateConfig(config: RollingUpdateConfiguration = {}): cdk
   };
 }
 
-class TagManager extends cdk.TagManager {
-  protected tagFormatResolve(tagGroups: cdk.TagGroups): any {
-    const tags = {...tagGroups.nonStickyTags, ...tagGroups.ancestorTags, ...tagGroups.stickyTags};
-    return Object.keys(tags).map( (key) => {
-      const propagateAtLaunch = !!tagGroups.propagateTags[key] || !!tagGroups.ancestorTags[key];
-      return {key, value: tags[key], propagateAtLaunch};
-    });
-  }
-}
-
 /**
  * Render a number of seconds to a PTnX string.
  */
@@ -658,6 +672,41 @@ export interface IAutoScalingGroup {
    * The name of the AutoScalingGroup
    */
   readonly autoScalingGroupName: string;
+
+  /**
+   * Send a message to either an SQS queue or SNS topic when instances launch or terminate
+   */
+  onLifecycleTransition(id: string, props: BasicLifecycleHookProps): LifecycleHook;
+
+  /**
+   * Scale out or in based on time
+   */
+  scaleOnSchedule(id: string, props: BasicScheduledActionProps): ScheduledAction;
+
+  /**
+   * Scale out or in to achieve a target CPU utilization
+   */
+  scaleOnCpuUtilization(id: string, props: CpuUtilizationScalingProps): TargetTrackingScalingPolicy;
+
+  /**
+   * Scale out or in to achieve a target network ingress rate
+   */
+  scaleOnIncomingBytes(id: string, props: NetworkUtilizationScalingProps): TargetTrackingScalingPolicy;
+
+  /**
+   * Scale out or in to achieve a target network egress rate
+   */
+  scaleOnOutgoingBytes(id: string, props: NetworkUtilizationScalingProps): TargetTrackingScalingPolicy;
+
+  /**
+   * Scale out or in in order to keep a metric around a target value
+   */
+  scaleToTrackMetric(id: string, props: MetricTargetTrackingProps): TargetTrackingScalingPolicy;
+
+  /**
+   * Scale out or in, in response to a metric
+   */
+  scaleOnMetric(id: string, props: BasicStepScalingPolicyProps): StepScalingPolicy;
 }
 
 /**

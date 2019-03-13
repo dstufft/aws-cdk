@@ -3,16 +3,69 @@ import events = require('@aws-cdk/aws-events');
 import iam = require('@aws-cdk/aws-iam');
 import s3 = require('@aws-cdk/aws-s3');
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from './codepipeline.generated';
+import { CfnPipeline } from './codepipeline.generated';
 import { CrossRegionScaffoldStack } from './cross-region-scaffold-stack';
-import { CommonStageProps, Stage, StagePlacement } from './stage';
+import { Stage } from './stage';
+
+/**
+ * Allows you to control where to place a new Stage when it's added to the Pipeline.
+ * Note that you can provide only one of the below properties -
+ * specifying more than one will result in a validation error.
+ *
+ * @see #rightBefore
+ * @see #justAfter
+ * @see #atIndex
+ */
+export interface StagePlacement {
+  /**
+   * Inserts the new Stage as a parent of the given Stage
+   * (changing its current parent Stage, if it had one).
+   */
+  readonly rightBefore?: cpapi.IStage;
+
+  /**
+   * Inserts the new Stage as a child of the given Stage
+   * (changing its current child Stage, if it had one).
+   */
+  readonly justAfter?: cpapi.IStage;
+
+  /**
+   * Inserts the new Stage at the given index in the Pipeline,
+   * moving the Stage currently at that index,
+   * and any subsequent ones, one index down.
+   * Indexing starts at 0.
+   * The maximum allowed value is {@link Pipeline#stageCount},
+   * which will insert the new Stage at the end of the Pipeline.
+   */
+  readonly atIndex?: number;
+}
+
+/**
+ * Construction properties of a Pipeline Stage.
+ */
+export interface StageProps {
+  /**
+   * The physical, human-readable name to assign to this Pipeline Stage.
+   */
+  name: string;
+
+  /**
+   * The list of Actions to create this Stage with.
+   * You can always add more Actions later by calling {@link IStage#addAction}.
+   */
+  actions?: cpapi.Action[];
+}
+
+export interface StageAddToPipelineProps extends StageProps {
+  placement?: StagePlacement;
+}
 
 export interface PipelineProps {
   /**
    * The S3 bucket used by this Pipeline to store artifacts.
    * If not specified, a new S3 bucket will be created.
    */
-  artifactBucket?: s3.BucketRef;
+  artifactBucket?: s3.IBucket;
 
   /**
    * Indicates whether to rerun the AWS CodePipeline pipeline after you update it.
@@ -34,6 +87,13 @@ export interface PipelineProps {
    * You can query the generated Stacks using the {@link Pipeline#crossRegionScaffoldStacks} property.
    */
   crossRegionReplicationBuckets?: { [region: string]: string };
+
+  /**
+   * The list of Stages, in order,
+   * to create this Pipeline with.
+   * You can always add more Stages later by calling {@link Pipeline#addStage}.
+   */
+  stages?: StageProps[];
 }
 
 /**
@@ -44,13 +104,14 @@ export interface PipelineProps {
  * const pipeline = new Pipeline(this, 'Pipeline');
  *
  * // add a stage
- * const sourceStage = new Stage(pipeline, 'Source');
+ * const sourceStage = pipeline.addStage({ name: 'Source' });
  *
  * // add a source action to the stage
- * new codecommit.PipelineSourceAction(sourceStage, 'Source', {
- *   artifactName: 'SourceArtifact',
+ * sourceStage.addAction(new codecommit.PipelineSourceAction({
+ *   actionName: 'Source',
+ *   outputArtifactName: 'SourceArtifact',
  *   repository: repo,
- * });
+ * }));
  *
  * // ... add more stages
  */
@@ -79,17 +140,17 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
   /**
    * Bucket used to store output artifacts
    */
-  public readonly artifactBucket: s3.BucketRef;
+  public readonly artifactBucket: s3.IBucket;
 
   private readonly stages = new Array<Stage>();
   private eventsRole?: iam.Role;
-  private readonly pipelineResource: cloudformation.PipelineResource;
+  private readonly pipelineResource: CfnPipeline;
   private readonly crossRegionReplicationBuckets: { [region: string]: string };
   private readonly artifactStores: { [region: string]: any };
   private readonly _crossRegionScaffoldStacks: { [region: string]: CrossRegionScaffoldStack } = {};
 
-  constructor(parent: cdk.Construct, name: string, props?: PipelineProps) {
-    super(parent, name);
+  constructor(scope: cdk.Construct, id: string, props?: PipelineProps) {
+    super(scope, id);
     props = props || {};
 
     cpapi.validateName('Pipeline', props.pipelineName);
@@ -107,7 +168,7 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
       assumedBy: new iam.ServicePrincipal('codepipeline.amazonaws.com')
     });
 
-    const codePipeline = new cloudformation.PipelineResource(this, 'Resource', {
+    const codePipeline = new CfnPipeline(this, 'Resource', {
       artifactStore: new cdk.Token(() => this.renderArtifactStore()) as any,
       stages: new cdk.Token(() => this.renderStages()) as any,
       roleArn: this.role.roleArn,
@@ -116,7 +177,7 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
     });
 
     // this will produce a DependsOn for both the role and the policy resources.
-    codePipeline.addDependency(this.role);
+    codePipeline.node.addDependency(this.role);
 
     this.artifactBucket.grantReadWrite(this.role);
 
@@ -127,25 +188,37 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
     this.artifactStores = {};
 
     // Does not expose a Fn::GetAtt for the ARN so we'll have to make it ourselves
-    this.pipelineArn = cdk.ArnUtils.fromComponents({
+    this.pipelineArn = this.node.stack.formatArn({
       service: 'codepipeline',
       resource: this.pipelineName
     });
+
+    for (const stage of props.stages || []) {
+      this.addStage(stage);
+    }
   }
 
   /**
-   * Convenience method for creating a new {@link Stage},
-   * and adding it to this Pipeline.
+   * Creates a new Stage, and adds it to this Pipeline.
    *
-   * @param name the name of the newly created Stage
-   * @param props the optional construction properties of the new Stage
+   * @param props the creation properties of the new Stage
    * @returns the newly created Stage
    */
-  public addStage(name: string, props?: CommonStageProps): Stage {
-    return new Stage(this, name, {
-      pipeline: this,
-      ...props,
-    });
+  public addStage(props: StageAddToPipelineProps): cpapi.IStage {
+    // check for duplicate Stages and names
+    if (this.stages.find(s => s.stageName === props.name)) {
+      throw new Error(`Stage with duplicate name '${props.name}' added to the Pipeline`);
+    }
+
+    const stage = new Stage(props, this);
+
+    const index = props.placement
+        ? this.calculateInsertIndexFromPlacement(props.placement)
+        : this.stageCount;
+
+    this.stages.splice(index, 0, stage);
+
+    return stage;
   }
 
   /**
@@ -181,7 +254,7 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
     }
 
     return {
-      id: this.id,
+      id: this.node.id,
       arn: this.pipelineArn,
       roleArn: this.eventsRole.roleArn,
     };
@@ -213,21 +286,6 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
   }
 
   /**
-   * Validate the pipeline structure
-   *
-   * Validation happens according to the rules documented at
-   *
-   * https://docs.aws.amazon.com/codepipeline/latest/userguide/reference-pipeline-structure.html#pipeline-requirements
-   * @override
-   */
-  public validate(): string[] {
-    return [
-      ...this.validateHasStages(),
-      ...this.validateSourceActionLocations()
-    ];
-  }
-
-  /**
    * Get the number of Stages in this Pipeline.
    */
   public get stageCount(): number {
@@ -255,45 +313,30 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
   }
 
   /**
-   * Adds a Stage to this Pipeline.
-   * This is an internal operation -
-   * a Stage is added to a Pipeline when it's constructed
-   * (the Pipeline is passed through the {@link StageProps#pipeline} property),
-   * so there is never a need to call this method explicitly.
+   * Validate the pipeline structure
    *
-   * @param stage the newly created Stage to add to this Pipeline
-   * @param placement an optional specification of where to place the newly added Stage in the Pipeline
+   * Validation happens according to the rules documented at
+   *
+   * https://docs.aws.amazon.com/codepipeline/latest/userguide/reference-pipeline-structure.html#pipeline-requirements
+   * @override
    */
-  // ignore unused private method (it's actually used in Stage)
-  // @ts-ignore
-  private _attachStage(stage: Stage, placement?: StagePlacement): void {
-    // _attachStage should be idempotent, in case a customer ever calls it directly
-    if (this.stages.includes(stage)) {
-      return;
-    }
-
-    if (this.stages.find(x => x.name === stage.name)) {
-      throw new Error(`A stage with name '${stage.name}' already exists`);
-    }
-
-    const index = placement
-      ? this.calculateInsertIndexFromPlacement(placement)
-      : this.stageCount;
-
-    this.stages.splice(index, 0, stage);
+  protected validate(): string[] {
+    return [
+      ...this.validateHasStages(),
+      ...this.validateSourceActionLocations()
+    ];
   }
 
   // ignore unused private method (it's actually used in Stage)
   // @ts-ignore
-  private _attachActionToRegion(stage: Stage, action: actions.Action): void {
+  private _attachActionToRegion(stage: Stage, action: cpapi.Action): void {
     // handle cross-region Actions here
     if (!action.region) {
       return;
     }
 
     // get the region the Pipeline itself is in
-    const pipelineStack = cdk.Stack.find(this);
-    const pipelineRegion = pipelineStack.requireRegion(
+    const pipelineRegion = this.node.stack.requireRegion(
       "You need to specify an explicit region when using CodePipeline's cross-region support");
 
     // if we already have an ArtifactStore generated for this region, or it's the Pipeline's region, nothing to do
@@ -303,9 +346,12 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
 
     let replicationBucketName = this.crossRegionReplicationBuckets[action.region];
     if (!replicationBucketName) {
-      const pipelineAccount = pipelineStack.requireAccountId(
+      const pipelineAccount = this.node.stack.requireAccountId(
         "You need to specify an explicit account when using CodePipeline's cross-region support");
-      const app = pipelineStack.parentApp();
+      const app = this.node.stack.parentApp();
+      if (!app) {
+        throw new Error(`Pipeline stack which uses cross region actions must be part of an application`);
+      }
       const crossRegionScaffoldStack = new CrossRegionScaffoldStack(app, {
         region: action.region,
         account: pipelineAccount,
@@ -314,7 +360,7 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
       replicationBucketName = crossRegionScaffoldStack.replicationBucketName;
     }
 
-    const replicationBucket = s3.BucketRef.import(this, 'CrossRegionCodePipelineReplicationBucket-' + action.region, {
+    const replicationBucket = s3.Bucket.import(this, 'CrossRegionCodePipelineReplicationBucket-' + action.region, {
       bucketName: replicationBucketName,
     });
     replicationBucket.grantReadWrite(this.role);
@@ -323,47 +369,6 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
       Location: replicationBucket.bucketName,
       Type: 'S3',
     };
-  }
-
-  // ignore unused private method (it's actually used in Stage)
-  // @ts-ignore
-  private _generateOutputArtifactName(stage: actions.IStage, action: actions.Action): string {
-    // generate the artifact name based on the Action's full logical ID,
-    // thus guaranteeing uniqueness
-    return 'Artifact_' + action.uniqueId;
-  }
-
-  /**
-   * Finds an input artifact for the given Action.
-   * The chosen artifact will be the output artifact of the
-   * last Action in the Pipeline
-   * (up to the Stage this Action belongs to),
-   * with the highest runOrder, that has an output artifact.
-   *
-   * @param stage the Stage `action` belongs to
-   * @param action the Action to find the input artifact for
-   */
-  // ignore unused private method (it's actually used in Stage)
-  // @ts-ignore
-  private _findInputArtifact(stage: cpapi.IStage, action: cpapi.Action): cpapi.Artifact {
-    // search for the first Action that has an outputArtifact,
-    // and return that
-    const startIndex = this.stages.findIndex(s => s === stage);
-    for (let i = startIndex; i >= 0; i--) {
-      const currentStage = this.stages[i];
-
-      // get all of the Actions in the Stage, sorted by runOrder, descending
-      const currentActions = currentStage.actions.sort((a1, a2) => -(a1.runOrder - a2.runOrder));
-      for (const currentAction of currentActions) {
-        // for the first Stage (the one that `action` belongs to)
-        // we need to only take into account Actions with a smaller runOrder than `action`
-        if ((i !== startIndex || currentAction.runOrder < action.runOrder) && currentAction._outputArtifacts.length > 0) {
-          return currentAction._outputArtifacts[0];
-        }
-      }
-    }
-    throw new Error(`Could not determine the input artifact for Action with name '${action.id}'. ` +
-      'Please provide it explicitly with the inputArtifact property.');
   }
 
   private calculateInsertIndexFromPlacement(placement: StagePlacement): number {
@@ -380,7 +385,7 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
       const targetIndex = this.findStageIndex(placement.rightBefore);
       if (targetIndex === -1) {
         throw new Error("Error adding Stage to the Pipeline: " +
-          `the requested Stage to add it before, '${placement.rightBefore.name}', was not found`);
+          `the requested Stage to add it before, '${placement.rightBefore.stageName}', was not found`);
       }
       return targetIndex;
     }
@@ -389,7 +394,7 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
       const targetIndex = this.findStageIndex(placement.justAfter);
       if (targetIndex === -1) {
         throw new Error("Error adding Stage to the Pipeline: " +
-          `the requested Stage to add it after, '${placement.justAfter.name}', was not found`);
+          `the requested Stage to add it after, '${placement.justAfter.stageName}', was not found`);
       }
       return targetIndex + 1;
     }
@@ -407,8 +412,8 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
     return this.stageCount;
   }
 
-  private findStageIndex(targetStage: Stage) {
-    return this.stages.findIndex((stage: Stage) => stage === targetStage);
+  private findStageIndex(targetStage: cpapi.IStage) {
+    return this.stages.findIndex(stage => stage === targetStage);
   }
 
   private validateSourceActionLocations(): string[] {
@@ -417,7 +422,7 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
     for (const stage of this.stages) {
       const onlySourceActionsPermitted = firstStage;
       for (const action of stage.actions) {
-        errors.push(...cpapi.validateSourceAction(onlySourceActionsPermitted, action.category, action.id, stage.id));
+        errors.push(...cpapi.validateSourceAction(onlySourceActionsPermitted, action.category, action.actionName, stage.stageName));
       }
       firstStage = false;
     }
@@ -431,8 +436,8 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
     return [];
   }
 
-  private renderArtifactStore(): cloudformation.PipelineResource.ArtifactStoreProperty {
-    let encryptionKey: cloudformation.PipelineResource.EncryptionKeyProperty | undefined;
+  private renderArtifactStore(): CfnPipeline.ArtifactStoreProperty {
+    let encryptionKey: CfnPipeline.EncryptionKeyProperty | undefined;
     const bucketKey = this.artifactBucket.encryptionKey;
     if (bucketKey) {
       encryptionKey = {
@@ -453,7 +458,7 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
     };
   }
 
-  private renderStages(): cloudformation.PipelineResource.StageDeclarationProperty[] {
+  private renderStages(): CfnPipeline.StageDeclarationProperty[] {
     // handle cross-region CodePipeline overrides here
     let crossRegion = false;
     this.stages.forEach((stage, i) => {
@@ -471,7 +476,7 @@ export class Pipeline extends cdk.Construct implements cpapi.IPipeline {
 
       // add the Pipeline's artifact store
       const artifactStore = this.renderArtifactStore();
-      this.artifactStores[cdk.Stack.find(this).requireRegion()] = {
+      this.artifactStores[this.node.stack.requireRegion()] = {
         Location: artifactStore.location,
         Type: artifactStore.type,
         EncryptionKey: artifactStore.encryptionKey,

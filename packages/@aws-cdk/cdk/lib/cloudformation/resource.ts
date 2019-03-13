@@ -1,10 +1,11 @@
 import cxapi = require('@aws-cdk/cx-api');
-import { Construct } from '../core/construct';
-import { capitalizePropertyNames, ignoreEmpty } from '../core/util';
-import { CloudFormationToken } from './cloudformation-token';
+import { Construct, IConstruct } from '../core/construct';
+import { TagManager } from '../core/tag-manager';
+import { capitalizePropertyNames, ignoreEmpty, PostResolveToken } from '../core/util';
+import { CfnReference } from './cfn-tokens';
 import { Condition } from './condition';
 import { CreationPolicy, DeletionPolicy, UpdatePolicy } from './resource-policy';
-import { IDependable, Referenceable, StackElement } from './stack';
+import { Referenceable } from './stack-element';
 
 export interface ResourceProps {
   /**
@@ -18,6 +19,12 @@ export interface ResourceProps {
   properties?: any;
 }
 
+export interface ITaggable {
+  /**
+   * TagManager to set, remove and format tags
+   */
+  readonly tags: TagManager;
+}
 /**
  * Represents a CloudFormation resource.
  */
@@ -39,6 +46,20 @@ export class Resource extends Referenceable {
   }
 
   /**
+   * Check whether the given construct is a Resource
+   */
+  public static isResource(construct: IConstruct): construct is Resource {
+    return (construct as any).resourceType !== undefined;
+  }
+
+  /**
+   * Check whether the given construct is Taggable
+   */
+  public static isTaggable(construct: any): construct is ITaggable {
+    return (construct as any).tags !== undefined;
+  }
+
+  /**
    * Options for this resource, such as condition, update policy etc.
    */
   public readonly options: ResourceOptions = {};
@@ -47,6 +68,13 @@ export class Resource extends Referenceable {
    * AWS resource type.
    */
   public readonly resourceType: string;
+
+  /**
+   * AWS resource properties.
+   *
+   * This object is rendered via a call to "renderProperties(this.properties)".
+   */
+  protected readonly properties: any;
 
   /**
    * AWS resource property overrides.
@@ -61,25 +89,23 @@ export class Resource extends Referenceable {
   protected readonly untypedPropertyOverrides: any = { };
 
   /**
-   * AWS resource properties.
-   *
-   * This object is rendered via a call to "renderProperties(this.properties)".
-   */
-  protected readonly properties: any;
-
-  /**
    * An object to be merged on top of the entire resource definition.
    */
   private readonly rawOverrides: any = { };
 
-  private dependsOn = new Array<IDependable>();
+  /**
+   * Logical IDs of dependencies.
+   *
+   * Is filled during prepare().
+   */
+  private readonly dependsOn = new Set<Resource>();
 
   /**
    * Creates a resource construct.
    * @param resourceType The CloudFormation type of this resource (e.g. AWS::DynamoDB::Table)
    */
-  constructor(parent: Construct, name: string, props: ResourceProps) {
-    super(parent, name);
+  constructor(scope: Construct, id: string, props: ResourceProps) {
+    super(scope, id);
 
     if (!props.type) {
       throw new Error('The `type` property is required');
@@ -91,9 +117,9 @@ export class Resource extends Referenceable {
     // if aws:cdk:enable-path-metadata is set, embed the current construct's
     // path in the CloudFormation template, so it will be possible to trace
     // back to the actual construct path.
-    if (this.getContext(cxapi.PATH_METADATA_ENABLE_CONTEXT)) {
+    if (this.node.getContext(cxapi.PATH_METADATA_ENABLE_CONTEXT)) {
       this.options.metadata = {
-        [cxapi.PATH_METADATA_KEY]: this.path
+        [cxapi.PATH_METADATA_KEY]: this.node.path
       };
     }
   }
@@ -105,15 +131,7 @@ export class Resource extends Referenceable {
    * @param attributeName The name of the attribute.
    */
   public getAtt(attributeName: string) {
-    return new CloudFormationToken({ 'Fn::GetAtt': [this.logicalId, attributeName] }, `${this.logicalId}.${attributeName}`);
-  }
-
-  /**
-   * Adds a dependency on another resource.
-   * @param other The other resource.
-   */
-  public addDependency(...other: IDependable[]) {
-    this.dependsOn.push(...other);
+    return new CfnReference({ 'Fn::GetAtt': [this.logicalId, attributeName] }, attributeName, this);
   }
 
   /**
@@ -176,30 +194,45 @@ export class Resource extends Referenceable {
   }
 
   /**
+   * Indicates that this resource depends on another resource and cannot be provisioned
+   * unless the other resource has been successfully provisioned.
+   */
+  public addDependsOn(resource: Resource) {
+    this.dependsOn.add(resource);
+  }
+
+  /**
    * Emits CloudFormation for this resource.
    */
   public toCloudFormation(): object {
     try {
+      if (Resource.isTaggable(this)) {
+        const tags = this.tags.renderTags();
+        this.properties.tags = tags === undefined ? this.properties.tags : tags;
+      }
       // merge property overrides onto properties and then render (and validate).
       const properties = this.renderProperties(deepMerge(this.properties || { }, this.untypedPropertyOverrides));
 
       return {
         Resources: {
-          [this.logicalId]: deepMerge({
+          // Post-Resolve operation since otherwise deepMerge is going to mix values into
+          // the Token objects returned by ignoreEmpty.
+          [this.logicalId]: new PostResolveToken({
             Type: this.resourceType,
             Properties: ignoreEmpty(properties),
-            DependsOn: ignoreEmpty(this.renderDependsOn()),
-            CreationPolicy:  capitalizePropertyNames(this.options.creationPolicy),
-            UpdatePolicy: capitalizePropertyNames(this.options.updatePolicy),
-            DeletionPolicy: capitalizePropertyNames(this.options.deletionPolicy),
+            DependsOn: ignoreEmpty(renderDependsOn(this.dependsOn)),
+            CreationPolicy:  capitalizePropertyNames(this, this.options.creationPolicy),
+            UpdatePolicy: capitalizePropertyNames(this, this.options.updatePolicy),
+            UpdateReplacePolicy: capitalizePropertyNames(this, this.options.updateReplacePolicy),
+            DeletionPolicy: capitalizePropertyNames(this, this.options.deletionPolicy),
             Metadata: ignoreEmpty(this.options.metadata),
             Condition: this.options.condition && this.options.condition.logicalId
-          }, this.rawOverrides)
+          }, props => deepMerge(props, this.rawOverrides))
         }
       };
     } catch (e) {
       // Change message
-      e.message = `While synthesizing ${this.path}: ${e.message}`;
+      e.message = `While synthesizing ${this.node.path}: ${e.message}`;
       // Adjust stack trace (make it look like node built it, too...)
       const creationStack = ['--- resource created at ---', ...this.creationStackTrace].join('\n  at ');
       const problemTrace = e.stack.substr(e.stack.indexOf(e.message) + e.message.length);
@@ -207,36 +240,28 @@ export class Resource extends Referenceable {
       // Re-throw
       throw e;
     }
+
+    // returns the set of logical ID (tokens) this resource depends on
+    // sorted by construct paths to ensure test determinism
+    function renderDependsOn(dependsOn: Set<Resource>) {
+      return Array
+        .from(dependsOn)
+        .sort((x, y) => x.node.path.localeCompare(y.node.path))
+        .map(r => r.logicalId);
+    }
   }
 
   protected renderProperties(properties: any): { [key: string]: any } {
     return properties;
   }
 
-  private renderDependsOn() {
-    const logicalIDs = new Set<string>();
-    for (const d of this.dependsOn) {
-      addDependency(d);
-    }
+}
 
-    return Array.from(logicalIDs);
-
-    function addDependency(d: IDependable) {
-      d.dependencyElements.forEach(dep => {
-        const logicalId = (dep as StackElement).logicalId;
-        if (logicalId) {
-          logicalIDs.add(logicalId);
-        }
-      });
-
-      // break if dependencyElements include only 'd', which means we reached a terminal.
-      if (d.dependencyElements.length === 1 && d.dependencyElements[0] === d) {
-        return;
-      } else {
-        d.dependencyElements.forEach(dep => addDependency(dep));
-      }
-    }
-  }
+export enum TagType {
+  Standard = 'StandardTag',
+  AutoScalingGroup = 'AutoScalingGroupTag',
+  Map = 'StringToStringMap',
+  NotTaggable = 'NotTaggable',
 }
 
 export interface ResourceOptions {
@@ -269,6 +294,12 @@ export interface ResourceOptions {
    * scheduled action is associated with the Auto Scaling group.
    */
   updatePolicy?: UpdatePolicy;
+
+  /**
+   * Use the UpdateReplacePolicy attribute to retain or (in some cases) backup the existing physical instance of a resource
+   * when it is replaced during a stack update operation.
+   */
+  updateReplacePolicy?: DeletionPolicy;
 
   /**
    * Metadata associated with the CloudFormation resource. This is not the same as the construct metadata which can be added

@@ -1,8 +1,5 @@
 import { Construct } from '../core/construct';
-import { Token } from '../core/tokens';
-import { Condition } from './condition';
-import { FnImportValue, FnJoin, FnSelect, FnSplit } from './fn';
-import { Stack, StackElement } from './stack';
+import { StackElement } from './stack-element';
 
 export interface OutputProps {
   /**
@@ -19,21 +16,23 @@ export interface OutputProps {
   value?: any;
 
   /**
-   * The name used to export the value of this output across stacks. To import
-   * the value from another stack, use `FnImportValue(export)`. You can create
-   * an import value token by calling `output.makeImportValue()`.
+   * The name used to export the value of this output across stacks.
    *
-   * @default The default behavior is to automatically allocate an export name
-   * for outputs based on the stack name and the output's logical ID. To
-   * create an output without an export, set `disableExport: true`.
+   * To import the value from another stack, use `FnImportValue(export)`. You
+   * can create an import value token by calling `output.makeImportValue()`.
+   *
+   * @default Automatically allocate a name when `makeImportValue()`  is
+   * called.
    */
   export?: string;
 
   /**
    * Disables the automatic allocation of an export name for this output.
    *
-   * @default false, which means that an export name is either explicitly
-   * specified or allocated based on the output's logical ID and stack name.
+   * This prohibits exporting this value, either by specifying `export` or
+   * by calling `makeImportValue()`.
+   *
+   * @default false
    */
   disableExport?: boolean;
 
@@ -53,17 +52,12 @@ export class Output extends StackElement {
   public readonly description?: string;
 
   /**
-   * The value of the property returned by the aws cloudformation describe-stacks command.
-   * The value of an output can include literals, parameter references, pseudo-parameters,
-   * a mapping value, or intrinsic functions.
-   */
-  public readonly value?: any;
-
-  /**
    * The name of the resource output to be exported for a cross-stack reference.
    * By default, the logical ID of the Output element is used as it's export name.
+   *
+   * May be undefined if the Output hasn't been exported yet.
    */
-  public readonly export?: string;
+  public export?: string;
 
   /**
    * A condition from the "Conditions" section to associate with this output
@@ -72,39 +66,49 @@ export class Output extends StackElement {
    */
   public readonly condition?: Condition;
 
+  private _value?: any;
+
+  private disableExport: boolean;
+
   /**
    * Creates an Output value for this stack.
    * @param parent The parent construct.
    * @param props Output properties.
    */
-  constructor(parent: Construct, name: string, props: OutputProps = {}) {
-    super(parent, name);
+  constructor(scope: Construct, id: string, props: OutputProps = {}) {
+    super(scope, id);
 
     this.description = props.description;
-    this.value = props.value;
+    this._value = props.value;
     this.condition = props.condition;
 
-    if (props.export) {
-      if (props.disableExport) {
-        throw new Error('Cannot set `disableExport` and specify an export name');
-      }
-      this.export = props.export;
-    } else if (!props.disableExport) {
-      // prefix export name with stack name since exports are global within account + region.
-      const stackName = Stack.find(this).id;
-      this.export = stackName ? stackName + ':' : '';
-      this.export += this.logicalId;
+    this.disableExport = props.disableExport !== undefined ? props.disableExport : false;
+
+    if (props.export && this.disableExport) {
+      throw new Error('Cannot set `disableExport` and specify an export name');
     }
+
+    this.export = props.export;
+
+    if (props.export) {
+      this.export = props.export;
+    }
+  }
+
+  /**
+   * The value of the property returned by the aws cloudformation describe-stacks command.
+   * The value of an output can include literals, parameter references, pseudo-parameters,
+   * a mapping value, or intrinsic functions.
+   */
+  public get value(): any {
+    return this._value;
   }
 
   /**
    * Returns an FnImportValue bound to this export name.
    */
   public makeImportValue() {
-    if (!this.export) {
-      throw new Error('Cannot create an ImportValue without an export name');
-    }
-    return new FnImportValue(this.export);
+    return fn().importValue(this.obtainExportName());
   }
 
   public toCloudFormation(): object {
@@ -122,6 +126,32 @@ export class Output extends StackElement {
 
   public get ref(): string {
     throw new Error('Outputs cannot be referenced');
+  }
+
+  /**
+   * Allocate an export name for this `Output` if not already done.
+   */
+  public obtainExportName(): string {
+    if (!this.export && this.disableExport) {
+      throw new Error('Cannot create an ImportValue; `disableExport` has been set.');
+    }
+    if (!this.export) {
+      this.export = this.uniqueOutputName();
+    }
+    return this.export;
+  }
+
+  /**
+   * Automatically determine an output name for use with FnImportValue
+   *
+   * This gets called in case the user hasn't specified an export name but is
+   * taking an action that requires exporting. We namespace with the stack name
+   * to reduce chances of collissions between CDK apps.
+   */
+  private uniqueOutputName() {
+    // prefix export name with stack name since exports are global within account + region.
+    const stackName = this.node.stack.name;
+    return (stackName ? stackName + ':' : '') + this.logicalId;
   }
 }
 
@@ -196,8 +226,8 @@ export class StringListOutput extends Construct {
    */
   private readonly output: Output;
 
-  constructor(parent: Construct, name: string, props: StringListOutputProps) {
-    super(parent, name);
+  constructor(scope: Construct, id: string, props: StringListOutputProps) {
+    super(scope, id);
 
     this.separator = props.separator || ',';
     this.length = props.values.length;
@@ -207,21 +237,28 @@ export class StringListOutput extends Construct {
       condition: props.condition,
       disableExport: props.disableExport,
       export: props.export,
-      value: new FnJoin(this.separator, props.values)
+      value: fn().join(this.separator, props.values)
     });
   }
 
   /**
    * Return an array of imported values for this Output
    */
-  public makeImportValues(): Token[] {
+  public makeImportValues(): string[] {
     const combined = this.output.makeImportValue();
 
     const ret = [];
     for (let i = 0; i < this.length; i++) {
-      ret.push(new FnSelect(i, new FnSplit(this.separator, combined)));
+      ret.push(fn().select(i, fn().split(this.separator, combined)));
     }
 
     return ret;
   }
 }
+
+function fn() {
+  // Lazy loading of "Fn" module to break dependency cycles on startup
+  return require('./fn').Fn;
+}
+
+import { Condition } from './condition';

@@ -1,8 +1,8 @@
 import assets = require('@aws-cdk/assets');
 import s3 = require('@aws-cdk/aws-s3');
+import cdk = require('@aws-cdk/cdk');
 import fs = require('fs');
-import { Function as Func } from './lambda';
-import { cloudformation } from './lambda.generated';
+import { CfnFunction } from './lambda.generated';
 
 export abstract class Code {
   /**
@@ -11,7 +11,7 @@ export abstract class Code {
    * @param key The object key
    * @param objectVersion Optional S3 object version
    */
-  public static bucket(bucket: s3.BucketRef, key: string, objectVersion?: string) {
+  public static bucket(bucket: s3.IBucket, key: string, objectVersion?: string) {
     return new S3Code(bucket, key, objectVersion);
   }
 
@@ -51,16 +51,23 @@ export abstract class Code {
   }
 
   /**
-   * Called during stack synthesis to render the CodePropery for the
-   * Lambda function.
+   * Determines whether this Code is inline code or not.
    */
-  public abstract toJSON(): cloudformation.FunctionResource.CodeProperty;
+  public abstract readonly isInline: boolean;
 
   /**
-   * Called when the lambda is initialized to allow this object to
+   * Called during stack synthesis to render the CodePropery for the
+   * Lambda function.
+   *
+   * @param resource the resource to which the code will be attached (a CfnFunction, or a CfnLayerVersion).
+   */
+  public abstract _toJSON(resource?: cdk.Resource): CfnFunction.CodeProperty;
+
+  /**
+   * Called when the lambda or layer is initialized to allow this object to
    * bind to the stack, add resources and have fun.
    */
-  public bind(_lambda: Func) {
+  public bind(_construct: cdk.Construct) {
     return;
   }
 }
@@ -69,9 +76,10 @@ export abstract class Code {
  * Lambda code from an S3 archive.
  */
 export class S3Code extends Code {
+  public readonly isInline = false;
   private bucketName: string;
 
-  constructor(bucket: s3.BucketRef, private key: string, private objectVersion?: string) {
+  constructor(bucket: s3.IBucket, private key: string, private objectVersion?: string) {
     super();
 
     if (!bucket.bucketName) {
@@ -81,7 +89,7 @@ export class S3Code extends Code {
     this.bucketName = bucket.bucketName;
   }
 
-  public toJSON(): cloudformation.FunctionResource.CodeProperty {
+  public _toJSON(_?: cdk.Resource): CfnFunction.CodeProperty {
     return {
       s3Bucket: this.bucketName,
       s3Key: this.key,
@@ -94,6 +102,8 @@ export class S3Code extends Code {
  * Lambda code from an inline string (limited to 4KiB).
  */
 export class InlineCode extends Code {
+  public readonly isInline = true;
+
   constructor(private code: string) {
     super();
 
@@ -102,13 +112,14 @@ export class InlineCode extends Code {
     }
   }
 
-  public bind(lambda: Func) {
-    if (!lambda.runtime.supportsInlineCode) {
-      throw new Error(`Inline source not allowed for ${lambda.runtime.name}`);
+  public bind(construct: cdk.Construct) {
+    const runtime = (construct as any).runtime;
+    if (!runtime.supportsInlineCode) {
+      throw new Error(`Inline source not allowed for ${runtime && runtime.name}`);
     }
   }
 
-  public toJSON(): cloudformation.FunctionResource.CodeProperty {
+  public _toJSON(_?: cdk.Resource): CfnFunction.CodeProperty {
     return {
       zipFile: this.code
     };
@@ -119,6 +130,8 @@ export class InlineCode extends Code {
  * Lambda code from a local directory.
  */
 export class AssetCode extends Code {
+  public readonly isInline = false;
+
   /**
    * The asset packaging.
    */
@@ -142,10 +155,10 @@ export class AssetCode extends Code {
     }
   }
 
-  public bind(lambda: Func) {
+  public bind(construct: cdk.Construct) {
     // If the same AssetCode is used multiple times, retain only the first instantiation.
     if (!this.asset) {
-      this.asset = new assets.Asset(lambda, 'Code', {
+      this.asset = new assets.Asset(construct, 'Code', {
         path: this.path,
         packaging: this.packaging
       });
@@ -156,7 +169,12 @@ export class AssetCode extends Code {
     }
   }
 
-  public toJSON(): cloudformation.FunctionResource.CodeProperty {
+  public _toJSON(resource?: cdk.Resource): CfnFunction.CodeProperty {
+    if (resource) {
+      // https://github.com/awslabs/aws-cdk/issues/1432
+      this.asset!.addResourceMetadata(resource, 'Code');
+    }
+
     return  {
       s3Bucket: this.asset!.s3BucketName,
       s3Key: this.asset!.s3ObjectKey

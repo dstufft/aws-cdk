@@ -1,17 +1,14 @@
-import cdk = require("@aws-cdk/cdk");
-import { Action, ActionCategory, CommonActionConstructProps, CommonActionProps } from "./action";
+import { Action, ActionArtifactBounds, ActionCategory, CommonActionProps } from "./action";
 import { Artifact } from "./artifact";
 
 /**
  * Construction properties of the low-level {@link TestAction test Action}.
  */
-export interface TestActionProps extends CommonActionProps, CommonActionConstructProps {
+export interface TestActionProps extends CommonActionProps {
   /**
    * The source to use as input for this test.
-   *
-   * @default CodePipeline will use the output of the last Action from a previous Stage as input
    */
-  inputArtifact?: Artifact;
+  inputArtifact: Artifact;
 
   /**
    * The optional name of the output artifact.
@@ -31,11 +28,23 @@ export interface TestActionProps extends CommonActionProps, CommonActionConstruc
   provider: string;
 
   /**
-   * The source action owner (could be 'AWS', 'ThirdParty' or 'Custom').
+   * The upper and lower bounds on the number of input and output artifacts for this Action.
+   */
+  artifactBounds: ActionArtifactBounds;
+
+  /**
+   * The test Action owner (could be 'AWS', 'ThirdParty' or 'Custom').
    *
    * @default 'AWS'
    */
   owner?: string;
+
+  /**
+   * The test Action version.
+   *
+   * @default '1'
+   */
+  version?: string;
 
   /**
    * The action's configuration. These are key-value pairs that specify input values for an action.
@@ -59,11 +68,10 @@ export interface TestActionProps extends CommonActionProps, CommonActionConstruc
 export abstract class TestAction extends Action {
   public readonly outputArtifact?: Artifact;
 
-  constructor(parent: cdk.Construct, name: string, props: TestActionProps) {
-    super(parent, name, {
-      category: ActionCategory.Test,
-      artifactBounds: { minInputs: 1, maxInputs: 1, minOutputs: 0, maxOutputs: 0 },
+  constructor(props: TestActionProps) {
+    super({
       ...props,
+      category: ActionCategory.Test,
     });
 
     this.addInputArtifact(props.inputArtifact);

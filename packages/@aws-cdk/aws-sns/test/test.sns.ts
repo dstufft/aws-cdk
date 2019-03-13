@@ -5,7 +5,6 @@ import lambda = require('@aws-cdk/aws-lambda');
 import s3n = require('@aws-cdk/aws-s3-notifications');
 import sqs = require('@aws-cdk/aws-sqs');
 import cdk = require('@aws-cdk/cdk');
-import { resolve } from '@aws-cdk/cdk';
 import { Test } from 'nodeunit';
 import sns = require('../lib');
 
@@ -129,6 +128,40 @@ export = {
       test.done();
     },
 
+    'url subscription (with raw delivery)'(test: Test) {
+      const stack = new cdk.Stack();
+
+      const topic = new sns.Topic(stack, 'MyTopic', {
+        topicName: 'topicName',
+        displayName: 'displayName'
+      });
+
+      topic.subscribeUrl('appsubscription', 'https://foobar.com/', true);
+
+      expect(stack).toMatch({
+        "Resources": {
+          "MyTopic86869434": {
+            "Type": "AWS::SNS::Topic",
+            "Properties": {
+              "DisplayName": "displayName",
+              "TopicName": "topicName"
+            }
+            },
+            "MyTopicappsubscription00FA69EA": {
+            "Type": "AWS::SNS::Subscription",
+            "Properties": {
+              "Endpoint": "https://foobar.com/",
+              "Protocol": "https",
+              "TopicArn": { "Ref": "MyTopic86869434" },
+              "RawMessageDelivery": true
+            }
+          }
+        }
+      });
+
+      test.done();
+    },
+
     'queue subscription'(test: Test) {
       const stack = new cdk.Stack();
 
@@ -150,7 +183,7 @@ export = {
           "TopicName": "topicName"
           }
         },
-        "MyTopicMyQueueSubscription3245B11E": {
+        "MyQueueMyTopicSubscriptionEB66AD1B": {
           "Type": "AWS::SNS::Subscription",
           "Properties": {
           "Endpoint": {
@@ -209,6 +242,35 @@ export = {
       test.done();
     },
 
+    'queue subscription (with raw delivery)'(test: Test) {
+      const stack = new cdk.Stack();
+
+      const topic = new sns.Topic(stack, 'MyTopic', {
+        topicName: 'topicName',
+        displayName: 'displayName'
+      });
+
+      const queue = new sqs.Queue(stack, 'MyQueue');
+
+      topic.subscribeQueue(queue, true);
+
+      expect(stack).to(haveResource('AWS::SNS::Subscription', {
+        "Endpoint": {
+          "Fn::GetAtt": [
+            "MyQueueE6CA6235",
+            "Arn"
+          ]
+        },
+        "Protocol": "sqs",
+        "TopicArn": {
+          "Ref": "MyTopic86869434"
+        },
+        "RawMessageDelivery": true
+      }));
+
+      test.done();
+    },
+
     'lambda subscription'(test: Test) {
       const stack = new cdk.Stack();
 
@@ -234,7 +296,7 @@ export = {
           "TopicName": "topicName"
           }
         },
-        "MyTopicMyFuncSubscriptionEAF54A3F": {
+        "MyFuncMyTopicSubscription708A6535": {
           "Type": "AWS::SNS::Subscription",
           "Properties": {
           "Endpoint": {
@@ -258,7 +320,7 @@ export = {
               "Action": "sts:AssumeRole",
               "Effect": "Allow",
               "Principal": {
-              "Service": "lambda.amazonaws.com"
+              "Service": { "Fn::Join": ["", ["lambda.", { Ref: "AWS::URLSuffix" }]] }
               }
             }
             ],
@@ -369,7 +431,7 @@ export = {
               "TopicName": "topicName"
             }
           },
-          "MyTopicMyQueueSubscription3245B11E": {
+          "MyQueueMyTopicSubscriptionEB66AD1B": {
             "Type": "AWS::SNS::Subscription",
             "Properties": {
               "Endpoint": {
@@ -384,7 +446,7 @@ export = {
               }
             }
           },
-          "MyTopicMyFuncSubscriptionEAF54A3F": {
+          "MyFuncMyTopicSubscription708A6535": {
             "Type": "AWS::SNS::Subscription",
             "Properties": {
               "Endpoint": {
@@ -446,7 +508,7 @@ export = {
                     "Action": "sts:AssumeRole",
                     "Effect": "Allow",
                     "Principal": {
-                      "Service": "lambda.amazonaws.com"
+                      "Service": { "Fn::Join": ["", ["lambda.", { Ref: "AWS::URLSuffix" }]] }
                     }
                   }
                 ],
@@ -505,6 +567,17 @@ export = {
 
       test.done();
     },
+
+    'invalid use of raw message delivery'(test: Test) {
+      // GIVEN
+      const stack = new cdk.Stack();
+      const topic = new sns.Topic(stack, 'Topic');
+
+      // THEN
+      test.throws(() => topic.subscribe('Nope', 'endpoint://location', sns.SubscriptionProtocol.Application, true),
+                  /Raw message delivery can only be enabled for HTTP\/S and SQS subscriptions/);
+      test.done();
+    }
   },
 
   'can add a policy to the topic'(test: Test) {
@@ -521,7 +594,9 @@ export = {
     // THEN
     expect(stack).to(haveResource('AWS::SNS::TopicPolicy', {
     PolicyDocument: {
+      Version: '2012-10-17',
       Statement: [{
+        "Sid": "0",
         "Action": "sns:*",
         "Effect": "Allow",
         "Principal": { "AWS": "arn" },
@@ -545,11 +620,12 @@ export = {
     // THEN
     expect(stack).to(haveResource('AWS::IAM::Policy', {
     "PolicyDocument": {
+      Version: '2012-10-17',
       "Statement": [
       {
         "Action": "sns:Publish",
         "Effect": "Allow",
-        "Resource": cdk.resolve(topic.topicArn)
+        "Resource": stack.node.resolve(topic.topicArn)
       }
       ],
     }
@@ -584,7 +660,7 @@ export = {
             "Action": "sns:Publish",
             "Effect": "Allow",
             "Principal": {
-            "Service": "events.amazonaws.com"
+              "Service": { "Fn::Join": ["", ["events.", { Ref: "AWS::URLSuffix" }]] }
             },
             "Resource": {
             "Ref": "MyTopic86869434"
@@ -674,7 +750,7 @@ export = {
 
     // WHEN
     const ref = topic.export();
-    const imported = sns.TopicRef.import(stack2, 'Imported', ref);
+    const imported = sns.Topic.import(stack2, 'Imported', ref);
     imported.subscribeQueue(queue);
 
     // THEN
@@ -682,20 +758,22 @@ export = {
     "TopicArn": { "Fn::ImportValue": "TopicTopicArnB66B79C2" },
     }));
     expect(stack2).to(haveResource('AWS::SQS::QueuePolicy', {
-    "PolicyDocument": {
-      "Statement": [
-      {
-        "Action": "sqs:SendMessage",
-        "Condition": {
-        "ArnEquals": {
-          "aws:SourceArn": { "Fn::ImportValue": "TopicTopicArnB66B79C2" }
-        }
-        },
-        "Principal": { "Service": "sns.amazonaws.com" },
-        "Effect": "Allow",
-      }
-      ],
-    },
+      PolicyDocument: {
+        Version: '2012-10-17',
+        Statement: [
+          {
+            "Action": "sqs:SendMessage",
+            "Condition": {
+              "ArnEquals": {
+                "aws:SourceArn": stack2.node.resolve(imported.topicArn)
+              }
+            },
+            "Principal": { "Service": "sns.amazonaws.com" },
+            "Resource": stack2.node.resolve(queue.queueArn),
+            "Effect": "Allow",
+          }
+        ],
+      },
     }));
 
     test.done();
@@ -710,20 +788,21 @@ export = {
     const bucketId = 'bucketId';
 
     const dest1 = topic.asBucketNotificationDestination(bucketArn, bucketId);
-    test.deepEqual(resolve(dest1.arn), resolve(topic.topicArn));
+    test.deepEqual(stack.node.resolve(dest1.arn), stack.node.resolve(topic.topicArn));
     test.deepEqual(dest1.type, s3n.BucketNotificationDestinationType.Topic);
 
     const dep: cdk.Construct = dest1.dependencies![0] as any;
-    test.deepEqual((dep.children[0] as any).logicalId, 'MyTopicPolicy12A5EC17', 'verify topic policy is added as dependency');
+    test.deepEqual(stack.node.resolve((dep.node.children[0] as any).logicalId),
+      'MyTopicPolicy12A5EC17', 'verify topic policy is added as dependency');
 
     // calling again on the same bucket yields is idempotent
     const dest2 = topic.asBucketNotificationDestination(bucketArn, bucketId);
-    test.deepEqual(resolve(dest2.arn), resolve(topic.topicArn));
+    test.deepEqual(stack.node.resolve(dest2.arn), stack.node.resolve(topic.topicArn));
     test.deepEqual(dest2.type, s3n.BucketNotificationDestinationType.Topic);
 
     // another bucket will be added to the topic policy
     const dest3 = topic.asBucketNotificationDestination('bucket2', 'bucket2');
-    test.deepEqual(resolve(dest3.arn), resolve(topic.topicArn));
+    test.deepEqual(stack.node.resolve(dest3.arn), stack.node.resolve(topic.topicArn));
     test.deepEqual(dest3.type, s3n.BucketNotificationDestinationType.Topic);
 
     expect(stack).toMatch({
@@ -745,7 +824,7 @@ export = {
             },
             "Effect": "Allow",
             "Principal": {
-            "Service": "s3.amazonaws.com"
+            "Service": { "Fn::Join": ["", ["s3.", { Ref: "AWS::URLSuffix" }]] }
             },
             "Resource": {
             "Ref": "MyTopic86869434"
@@ -761,7 +840,7 @@ export = {
             },
             "Effect": "Allow",
             "Principal": {
-            "Service": "s3.amazonaws.com"
+            "Service": { "Fn::Join": ["", ["s3.", { Ref: "AWS::URLSuffix" }]] }
             },
             "Resource": {
             "Ref": "MyTopic86869434"
@@ -779,6 +858,31 @@ export = {
         }
       }
       }
+    });
+
+    test.done();
+  },
+
+  'test metrics'(test: Test) {
+    // GIVEN
+    const stack = new cdk.Stack();
+    const topic = new sns.Topic(stack, 'Topic');
+
+    // THEN
+    test.deepEqual(stack.node.resolve(topic.metricNumberOfMessagesPublished()), {
+      dimensions: {TopicName: { 'Fn::GetAtt': [ 'TopicBFC7AF6E', 'TopicName' ] }},
+      namespace: 'AWS/SNS',
+      metricName: 'NumberOfMessagesPublished',
+      periodSec: 300,
+      statistic: 'Sum'
+    });
+
+    test.deepEqual(stack.node.resolve(topic.metricPublishSize()), {
+      dimensions: {TopicName: { 'Fn::GetAtt': [ 'TopicBFC7AF6E', 'TopicName' ] }},
+      namespace: 'AWS/SNS',
+      metricName: 'PublishSize',
+      periodSec: 300,
+      statistic: 'Average'
     });
 
     test.done();

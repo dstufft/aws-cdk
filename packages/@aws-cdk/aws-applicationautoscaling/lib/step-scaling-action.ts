@@ -1,6 +1,6 @@
 import cloudwatch = require('@aws-cdk/aws-cloudwatch');
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from './applicationautoscaling.generated';
+import { CfnScalingPolicy } from './applicationautoscaling.generated';
 import { ScalableTarget } from './scalable-target';
 
 /**
@@ -78,13 +78,13 @@ export class StepScalingAction extends cdk.Construct implements cloudwatch.IAlar
    */
   public readonly alarmActionArn: string;
 
-  private readonly adjustments = new Array<cloudformation.ScalingPolicyResource.StepAdjustmentProperty>();
+  private readonly adjustments = new Array<CfnScalingPolicy.StepAdjustmentProperty>();
 
-  constructor(parent: cdk.Construct, id: string, props: StepScalingActionProps) {
-    super(parent, id);
+  constructor(scope: cdk.Construct, id: string, props: StepScalingActionProps) {
+    super(scope, id);
 
-    const resource = new cloudformation.ScalingPolicyResource(this, 'Resource', {
-      policyName: props.policyName || this.uniqueId,
+    const resource = new CfnScalingPolicy(this, 'Resource', {
+      policyName: props.policyName || this.node.uniqueId,
       policyType: 'StepScaling',
       stepScalingPolicyConfiguration: {
         adjustmentType: props.adjustmentType,
@@ -92,7 +92,7 @@ export class StepScalingAction extends cdk.Construct implements cloudwatch.IAlar
         minAdjustmentMagnitude: props.minAdjustmentMagnitude,
         metricAggregationType: props.metricAggregationType,
         stepAdjustments: new cdk.Token(() => this.adjustments),
-      } as cloudformation.ScalingPolicyResource.StepScalingPolicyConfigurationProperty
+      } as CfnScalingPolicy.StepScalingPolicyConfigurationProperty
     });
 
     this.scalingPolicyArn = resource.scalingPolicyArn;

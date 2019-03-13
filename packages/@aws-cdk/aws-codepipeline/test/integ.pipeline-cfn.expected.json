@@ -13,7 +13,17 @@
               "Action": "sts:AssumeRole",
               "Effect": "Allow",
               "Principal": {
-                "Service": "codepipeline.amazonaws.com"
+                "Service": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "codepipeline.",
+                      {
+                        "Ref": "AWS::URLSuffix"
+                      }
+                    ]
+                  ]
+                }
               }
             }
           ],
@@ -147,12 +157,6 @@
     "PipelineC660917D": {
       "Type": "AWS::CodePipeline::Pipeline",
       "Properties": {
-        "ArtifactStore": {
-          "Location": {
-            "Ref": "PipelineArtifactsBucket22248F97"
-          },
-          "Type": "S3"
-        },
         "RoleArn": {
           "Fn::GetAtt": [
             "PipelineRoleD68726F7",
@@ -173,8 +177,7 @@
                   "S3Bucket": {
                     "Ref": "PipelineBucketB967BD35"
                   },
-                  "S3ObjectKey": "key",
-                  "PollForSourceChanges": true
+                  "S3ObjectKey": "key"
                 },
                 "InputArtifacts": [],
                 "Name": "Source",
@@ -207,7 +210,8 @@
                       "CfnChangeSetRole6F05F6FC",
                       "Arn"
                     ]
-                  }
+                  },
+                  "ParameterOverrides": "{\"BucketName\":{\"Fn::GetArtifactAtt\":[\"SourceArtifact\",\"BucketName\"]},\"ObjectKey\":{\"Fn::GetArtifactAtt\":[\"SourceArtifact\",\"ObjectKey\"]},\"Url\":{\"Fn::GetArtifactAtt\":[\"SourceArtifact\",\"URL\"]},\"OtherParam\":{\"Fn::GetParam\":[\"SourceArtifact\",\"params.json\",\"OtherParam\"]}}"
                 },
                 "InputArtifacts": [
                   {
@@ -221,11 +225,17 @@
             ],
             "Name": "CFN"
           }
-        ]
+        ],
+        "ArtifactStore": {
+          "Location": {
+            "Ref": "PipelineArtifactsBucket22248F97"
+          },
+          "Type": "S3"
+        }
       },
       "DependsOn": [
-        "PipelineRoleD68726F7",
-        "PipelineRoleDefaultPolicyC7A05455"
+        "PipelineRoleDefaultPolicyC7A05455",
+        "PipelineRoleD68726F7"
       ]
     },
     "PipelineBucketB967BD35": {
@@ -245,7 +255,17 @@
               "Action": "sts:AssumeRole",
               "Effect": "Allow",
               "Principal": {
-                "Service": "cloudformation.amazonaws.com"
+                "Service": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "cloudformation.",
+                      {
+                        "Ref": "AWS::URLSuffix"
+                      }
+                    ]
+                  ]
+                }
               }
             }
           ],

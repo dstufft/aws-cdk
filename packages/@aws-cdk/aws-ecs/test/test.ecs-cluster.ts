@@ -15,7 +15,7 @@ export = {
         vpc,
       });
 
-      cluster.addDefaultAutoScalingGroupCapacity({
+      cluster.addCapacity('DefaultAutoScalingGroup', {
         instanceType: new ec2.InstanceType('t2.micro')
       });
 
@@ -67,7 +67,7 @@ export = {
 
       expect(stack).to(haveResource("AWS::AutoScaling::AutoScalingGroup", {
         MaxSize: "1",
-        MinSize: "0",
+        MinSize: "1",
         DesiredCapacity: "1",
         LaunchConfigurationName: {
           Ref: "EcsClusterDefaultAutoScalingGroupLaunchConfigB7E376C1"
@@ -120,7 +120,7 @@ export = {
               Action: "sts:AssumeRole",
               Effect: "Allow",
               Principal: {
-                Service: "ec2.amazonaws.com"
+                Service: { "Fn::Join": ["", ["ec2.", { Ref: "AWS::URLSuffix" }]] }
               }
             }
           ],
@@ -154,6 +154,32 @@ export = {
 
       test.done();
     },
+
+    'lifecycle hook is automatically added'(test: Test) {
+      // GIVEN
+      const stack =  new cdk.Stack();
+      const vpc = new ec2.VpcNetwork(stack, 'MyVpc', {});
+      const cluster = new ecs.Cluster(stack, 'EcsCluster', {
+        vpc,
+      });
+
+      // WHEN
+      cluster.addCapacity('DefaultAutoScalingGroup', {
+        instanceType: new ec2.InstanceType('t2.micro')
+      });
+
+      // THEN
+      expect(stack).to(haveResource('AWS::AutoScaling::LifecycleHook', {
+        AutoScalingGroupName: { Ref: "EcsClusterDefaultAutoScalingGroupASGC1A785DB" },
+        LifecycleTransition: "autoscaling:EC2_INSTANCE_TERMINATING",
+        DefaultResult: "CONTINUE",
+        HeartbeatTimeout: 300,
+        NotificationTargetARN: { Ref: "EcsClusterDefaultAutoScalingGroupDrainECSHookTopicC705BD25" },
+        RoleARN: { "Fn::GetAtt": [ "EcsClusterDefaultAutoScalingGroupLifecycleHookDrainHookRoleA38EC83B", "Arn" ] }
+      }));
+
+      test.done();
+    },
   },
 
   "allows specifying instance type"(test: Test) {
@@ -162,7 +188,7 @@ export = {
     const vpc = new ec2.VpcNetwork(stack, 'MyVpc', {});
 
     const cluster = new ecs.Cluster(stack, 'EcsCluster', { vpc });
-    cluster.addDefaultAutoScalingGroupCapacity({
+    cluster.addCapacity('DefaultAutoScalingGroup', {
       instanceType: new InstanceType("m3.large")
     });
 
@@ -180,9 +206,9 @@ export = {
     const vpc = new ec2.VpcNetwork(stack, 'MyVpc', {});
 
     const cluster = new ecs.Cluster(stack, 'EcsCluster', { vpc });
-    cluster.addDefaultAutoScalingGroupCapacity({
+    cluster.addCapacity('DefaultAutoScalingGroup', {
       instanceType: new ec2.InstanceType('t2.micro'),
-      instanceCount: 3
+      desiredCapacity: 3
     });
 
     // THEN

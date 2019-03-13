@@ -2,7 +2,7 @@ import api = require('@aws-cdk/aws-autoscaling-api');
 import iam = require('@aws-cdk/aws-iam');
 import cdk = require('@aws-cdk/cdk');
 import { IAutoScalingGroup } from './auto-scaling-group';
-import { cloudformation } from './autoscaling.generated';
+import { CfnLifecycleHook } from './autoscaling.generated';
 
 /**
  * Basic properties for a lifecycle hook
@@ -27,7 +27,7 @@ export interface BasicLifecycleHookProps {
    *
    * If the lifecycle hook times out, perform the action in DefaultResult.
    */
-  heartbeatTimeout?: number;
+  heartbeatTimeoutSec?: number;
 
   /**
    * The state of the Amazon EC2 instance to which you want to attach the lifecycle hook.
@@ -75,8 +75,8 @@ export class LifecycleHook extends cdk.Construct implements api.ILifecycleHook {
    */
   public readonly lifecycleHookName: string;
 
-  constructor(parent: cdk.Construct, id: string, props: LifecycleHookProps) {
-    super(parent, id);
+  constructor(scope: cdk.Construct, id: string, props: LifecycleHookProps) {
+    super(scope, id);
 
     this.role = props.role || new iam.Role(this, 'Role', {
       assumedBy: new iam.ServicePrincipal('autoscaling.amazonaws.com')
@@ -84,16 +84,21 @@ export class LifecycleHook extends cdk.Construct implements api.ILifecycleHook {
 
     const targetProps = props.notificationTarget.asLifecycleHookTarget(this);
 
-    const resource = new cloudformation.LifecycleHookResource(this, 'Resource', {
+    const resource = new CfnLifecycleHook(this, 'Resource', {
       autoScalingGroupName: props.autoScalingGroup.autoScalingGroupName,
       defaultResult: props.defaultResult,
-      heartbeatTimeout: props.heartbeatTimeout,
+      heartbeatTimeout: props.heartbeatTimeoutSec,
       lifecycleHookName: props.lifecycleHookName,
       lifecycleTransition: props.lifecycleTransition,
       notificationMetadata: props.notificationMetadata,
       notificationTargetArn: targetProps.notificationTargetArn,
       roleArn: this.role.roleArn,
     });
+
+    // A LifecycleHook resource is going to do a permissions test upon creation,
+    // so we have to make sure the role has full permissions before creating the
+    // lifecycle hook.
+    resource.node.addDependency(this.role);
 
     this.lifecycleHookName = resource.lifecycleHookName;
   }

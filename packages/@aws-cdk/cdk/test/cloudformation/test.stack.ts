@@ -1,5 +1,6 @@
+import cxapi = require('@aws-cdk/cx-api');
 import { Test } from 'nodeunit';
-import { App, Condition, Construct, Include, Output, Parameter, Resource, Root, Stack, Token } from '../../lib';
+import { App, Condition, Construct, Include, Output, Parameter, Resource, ScopedAws, Stack, Token } from '../../lib';
 
 export = {
   'a stack can be serialized into a CloudFormation template, initially it\'s empty'(test: Test) {
@@ -21,32 +22,11 @@ export = {
     test.done();
   },
 
-  'Stack.find(c) can be used to find the stack from any point in the tree'(test: Test) {
-    const stack = new Stack();
-    const level1 = new Construct(stack, 'level1');
-    const level2 = new Construct(level1, 'level2');
-    const level3 = new Construct(level2, 'level3');
-    const res1 = new Resource(level1, 'childoflevel1', { type: 'MyResourceType1' });
-    const res2 = new Resource(level3, 'childoflevel3', { type: 'MyResourceType2' });
-
-    test.equal(Stack.find(res1), stack);
-    test.equal(Stack.find(res2), stack);
-    test.equal(Stack.find(level2), stack);
-
-    const root = new Root();
-    const child = new Construct(root, 'child');
-
-    test.throws(() => Stack.find(child));
-    test.throws(() => Stack.find(root));
-
-    test.done();
-  },
-
   'Stack.isStack indicates that a construct is a stack'(test: Test) {
     const stack = new Stack();
     const c = new Construct(stack, 'Construct');
-    test.ok(stack.isStack);
-    test.ok(!(c as any).isStack);
+    test.ok(Stack.isStack(stack));
+    test.ok(!Stack.isStack(c));
     test.done();
   },
 
@@ -111,7 +91,7 @@ export = {
   'Construct.findResource(logicalId) can be used to retrieve a resource by its path'(test: Test) {
     const stack = new Stack();
 
-    test.ok(!stack.tryFindChild('foo'), 'empty stack');
+    test.ok(!stack.node.tryFindChild('foo'), 'empty stack');
 
     const r1 = new Resource(stack, 'Hello', { type: 'MyResource' });
     test.equal(stack.findResource(r1.stackPath), r1, 'look up top-level');
@@ -129,7 +109,7 @@ export = {
 
     const p = new Parameter(stack, 'MyParam', { type: 'String' });
 
-    test.throws(() => stack.findResource(p.path));
+    test.throws(() => stack.findResource(p.node.path));
     test.done();
   },
 
@@ -141,9 +121,9 @@ export = {
     const o = new Output(stack, 'MyOutput');
     const c = new Condition(stack, 'MyCondition');
 
-    test.equal(stack.findChild(p.path), p);
-    test.equal(stack.findChild(o.path), o);
-    test.equal(stack.findChild(c.path), c);
+    test.equal(stack.node.findChild(p.node.path), p);
+    test.equal(stack.node.findChild(o.node.path), o);
+    test.equal(stack.node.findChild(c.node.path), c);
 
     test.done();
   },
@@ -172,23 +152,227 @@ export = {
     test.done();
   },
 
-  'Can\'t add children during synthesis'(test: Test) {
-    const stack = new Stack();
+  'Pseudo values attached to one stack can be referenced in another stack'(test: Test) {
+    // GIVEN
+    const app = new App();
+    const stack1 = new Stack(app, 'Stack1');
+    const account1 = new ScopedAws(stack1).accountId;
+    const stack2 = new Stack(app, 'Stack2');
 
-    // add a construct with a token that when resolved adds a child. this
-    // means that this child is going to be added during synthesis and this
-    // is a no-no.
-    new Resource(stack, 'Resource', { type: 'T', properties: {
-      foo: new Token(() => new Construct(stack, 'Foo'))
-    }});
+    // WHEN - used in another stack
+    new Parameter(stack2, 'SomeParameter', { type: 'String', default: account1 });
 
-    test.throws(() => stack.toCloudFormation(), /Cannot add children during synthesis/);
+    // THEN
+    // Need to do this manually now, since we're in testing mode. In a normal CDK app,
+    // this happens as part of app.run().
+    app.node.prepareTree();
 
-    // okay to add after synthesis
-    new Construct(stack, 'C1');
+    test.deepEqual(stack1.toCloudFormation(), {
+      Outputs: {
+        ExportsOutputRefAWSAccountIdAD568057: {
+          Value: { Ref: 'AWS::AccountId' },
+          Export: { Name: 'Stack1:ExportsOutputRefAWSAccountIdAD568057' }
+        }
+      }
+    });
+
+    test.deepEqual(stack2.toCloudFormation(), {
+      Parameters: {
+        SomeParameter: {
+          Type: 'String',
+          Default: { 'Fn::ImportValue': 'Stack1:ExportsOutputRefAWSAccountIdAD568057' }
+        }
+      }
+    });
 
     test.done();
   },
+
+  'cross-stack references in lazy tokens work'(test: Test) {
+    // GIVEN
+    const app = new App();
+    const stack1 = new Stack(app, 'Stack1');
+    const account1 = new ScopedAws(stack1).accountId;
+    const stack2 = new Stack(app, 'Stack2');
+
+    // WHEN - used in another stack
+    new Parameter(stack2, 'SomeParameter', { type: 'String', default: new Token(() => account1) });
+
+    app.node.prepareTree();
+
+    // THEN
+    test.deepEqual(stack1.toCloudFormation(), {
+      Outputs: {
+        ExportsOutputRefAWSAccountIdAD568057: {
+          Value: { Ref: 'AWS::AccountId' },
+          Export: { Name: 'Stack1:ExportsOutputRefAWSAccountIdAD568057' }
+        }
+      }
+    });
+
+    test.deepEqual(stack2.toCloudFormation(), {
+      Parameters: {
+        SomeParameter: {
+          Type: 'String',
+          Default: { 'Fn::ImportValue': 'Stack1:ExportsOutputRefAWSAccountIdAD568057' }
+        }
+      }
+    });
+
+    test.done();
+  },
+
+  'Cross-stack use of Region returns nonscoped intrinsic'(test: Test) {
+    // GIVEN
+    const app = new App();
+    const stack1 = new Stack(app, 'Stack1');
+    const stack2 = new Stack(app, 'Stack2');
+
+    // WHEN - used in another stack
+    new Output(stack2, 'DemOutput', { value: stack1.region });
+
+    // THEN
+    // Need to do this manually now, since we're in testing mode. In a normal CDK app,
+    // this happens as part of app.run().
+    app.node.prepareTree();
+
+    test.deepEqual(stack2.toCloudFormation(), {
+      Outputs: {
+        DemOutput: {
+          Value: { Ref: 'AWS::Region' },
+        }
+      }
+    });
+
+    test.done();
+  },
+
+  'cross-stack references in strings work'(test: Test) {
+    // GIVEN
+    const app = new App();
+    const stack1 = new Stack(app, 'Stack1');
+    const account1 = new ScopedAws(stack1).accountId;
+    const stack2 = new Stack(app, 'Stack2');
+
+    // WHEN - used in another stack
+    new Parameter(stack2, 'SomeParameter', { type: 'String', default: `TheAccountIs${account1}` });
+
+    app.node.prepareTree();
+
+    // THEN
+    test.deepEqual(stack2.toCloudFormation(), {
+      Parameters: {
+        SomeParameter: {
+          Type: 'String',
+          Default: { 'Fn::Join': [ '', [ 'TheAccountIs', { 'Fn::ImportValue': 'Stack1:ExportsOutputRefAWSAccountIdAD568057' } ]] }
+        }
+      }
+    });
+
+    test.done();
+  },
+
+  'cannot create cyclic reference between stacks'(test: Test) {
+    // GIVEN
+    const app = new App();
+    const stack1 = new Stack(app, 'Stack1');
+    const account1 = new ScopedAws(stack1).accountId;
+    const stack2 = new Stack(app, 'Stack2');
+    const account2 = new ScopedAws(stack2).accountId;
+
+    // WHEN
+    new Parameter(stack2, 'SomeParameter', { type: 'String', default: account1 });
+    new Parameter(stack1, 'SomeParameter', { type: 'String', default: account2 });
+
+    test.throws(() => {
+      app.node.prepareTree();
+    }, /Adding this dependency would create a cyclic reference/);
+
+    test.done();
+  },
+
+  'stacks know about their dependencies'(test: Test) {
+    // GIVEN
+    const app = new App();
+    const stack1 = new Stack(app, 'Stack1');
+    const account1 = new ScopedAws(stack1).accountId;
+    const stack2 = new Stack(app, 'Stack2');
+
+    // WHEN
+    new Parameter(stack2, 'SomeParameter', { type: 'String', default: account1 });
+
+    app.node.prepareTree();
+
+    // THEN
+    test.deepEqual(stack2.dependencies().map(s => s.node.id), ['Stack1']);
+
+    test.done();
+  },
+
+  'cannot create references to stacks in other regions/accounts'(test: Test) {
+    // GIVEN
+    const app = new App();
+    const stack1 = new Stack(app, 'Stack1', { env: { account: '123456789012', region: 'es-norst-1' }});
+    const account1 = new ScopedAws(stack1).accountId;
+    const stack2 = new Stack(app, 'Stack2', { env: { account: '123456789012', region: 'es-norst-2' }});
+
+    // WHEN
+    new Parameter(stack2, 'SomeParameter', { type: 'String', default: account1 });
+
+    test.throws(() => {
+      app.node.prepareTree();
+    }, /Can only reference cross stacks in the same region and account/);
+
+    test.done();
+  },
+
+  'stack with region supplied via props returns literal value'(test: Test) {
+    // GIVEN
+    const app = new App();
+    const stack = new Stack(app, 'Stack1', { env: { account: '123456789012', region: 'es-norst-1' }});
+
+    // THEN
+    test.equal(stack.node.resolve(stack.region), 'es-norst-1');
+
+    test.done();
+  },
+
+  'stack with region supplied via context returns symbolic value'(test: Test) {
+    // GIVEN
+    const app = new App();
+
+    app.node.setContext(cxapi.DEFAULT_REGION_CONTEXT_KEY, 'es-norst-1');
+    const stack = new Stack(app, 'Stack1');
+
+    // THEN
+    test.deepEqual(stack.node.resolve(stack.region), { Ref: 'AWS::Region' });
+
+    test.done();
+  },
+
+  'overrideLogicalId(id) can be used to override the logical ID of a resource'(test: Test) {
+    // GIVEN
+    const stack = new Stack();
+    const bonjour = new Resource(stack, 'BonjourResource', { type: 'Resource::Type' });
+
+    // { Ref } and { GetAtt }
+    new Resource(stack, 'RefToBonjour', { type: 'Other::Resource', properties: {
+      RefToBonjour: bonjour.ref.toString(),
+      GetAttBonjour: bonjour.getAtt('TheAtt').toString()
+    }});
+
+    bonjour.overrideLogicalId('BOOM');
+
+    // THEN
+    test.deepEqual(stack.toCloudFormation(), { Resources:
+      { BOOM: { Type: 'Resource::Type' },
+        RefToBonjour:
+         { Type: 'Other::Resource',
+           Properties:
+            { RefToBonjour: { Ref: 'BOOM' },
+              GetAttBonjour: { 'Fn::GetAtt': [ 'BOOM', 'TheAtt' ] } } } } });
+    test.done();
+  }
 };
 
 class StackWithPostProcessor extends Stack {

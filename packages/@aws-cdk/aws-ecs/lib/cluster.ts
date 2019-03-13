@@ -3,7 +3,8 @@ import cloudwatch = require ('@aws-cdk/aws-cloudwatch');
 import ec2 = require('@aws-cdk/aws-ec2');
 import iam = require('@aws-cdk/aws-iam');
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from './ecs.generated';
+import { InstanceDrainHook } from './drain-hook/instance-drain-hook';
+import { CfnCluster } from './ecs.generated';
 
 /**
  * Properties to define an ECS cluster
@@ -19,7 +20,7 @@ export interface ClusterProps {
   /**
    * The VPC where your ECS instances will be running or your ENIs will be deployed
    */
-  vpc: ec2.VpcNetworkRef;
+  vpc: ec2.IVpcNetwork;
 }
 
 /**
@@ -29,8 +30,8 @@ export class Cluster extends cdk.Construct implements ICluster {
   /**
    * Import an existing cluster
    */
-  public static import(parent: cdk.Construct, name: string, props: ImportedClusterProps): ICluster {
-    return new ImportedCluster(parent, name, props);
+  public static import(scope: cdk.Construct, id: string, props: ClusterImportProps): ICluster {
+    return new ImportedCluster(scope, id, props);
   }
 
   /**
@@ -41,7 +42,7 @@ export class Cluster extends cdk.Construct implements ICluster {
   /**
    * The VPC this cluster was created in.
    */
-  public readonly vpc: ec2.VpcNetworkRef;
+  public readonly vpc: ec2.IVpcNetwork;
 
   /**
    * The ARN of this cluster
@@ -58,10 +59,10 @@ export class Cluster extends cdk.Construct implements ICluster {
    */
   private _hasEc2Capacity: boolean = false;
 
-  constructor(parent: cdk.Construct, name: string, props: ClusterProps) {
-    super(parent, name);
+  constructor(scope: cdk.Construct, id: string, props: ClusterProps) {
+    super(scope, id);
 
-    const cluster = new cloudformation.ClusterResource(this, 'Resource', {clusterName: props.clusterName});
+    const cluster = new CfnCluster(this, 'Resource', {clusterName: props.clusterName});
 
     this.vpc = props.vpc;
     this.clusterArn = cluster.clusterArn;
@@ -70,25 +71,27 @@ export class Cluster extends cdk.Construct implements ICluster {
 
   /**
    * Add a default-configured AutoScalingGroup running the ECS-optimized AMI to this Cluster
+   *
+   * Returns the AutoScalingGroup so you can add autoscaling settings to it.
    */
-  public addDefaultAutoScalingGroupCapacity(options: AddDefaultAutoScalingGroupOptions) {
-    const autoScalingGroup = new autoscaling.AutoScalingGroup(this, 'DefaultAutoScalingGroup', {
+  public addCapacity(id: string, options: AddCapacityOptions): autoscaling.AutoScalingGroup {
+    const autoScalingGroup = new autoscaling.AutoScalingGroup(this, id, {
+      ...options,
       vpc: this.vpc,
-      instanceType: options.instanceType,
       machineImage: new EcsOptimizedAmi(),
-      updateType: autoscaling.UpdateType.ReplacingUpdate,
-      minSize: 0,
-      maxSize: options.instanceCount || 1,
-      desiredCapacity: options.instanceCount || 1
+      updateType: options.updateType || autoscaling.UpdateType.ReplacingUpdate,
+      instanceType: options.instanceType,
     });
 
-    this.addAutoScalingGroupCapacity(autoScalingGroup);
+    this.addAutoScalingGroup(autoScalingGroup, options);
+
+    return autoScalingGroup;
   }
 
   /**
    * Add compute capacity to this ECS cluster in the form of an AutoScalingGroup
    */
-  public addAutoScalingGroupCapacity(autoScalingGroup: autoscaling.AutoScalingGroup, options: AddAutoScalingGroupCapacityOptions = {}) {
+  public addAutoScalingGroup(autoScalingGroup: autoscaling.AutoScalingGroup, options: AddAutoScalingGroupCapacityOptions = {}) {
     this._hasEc2Capacity = true;
     this.connections.connections.addSecurityGroup(...autoScalingGroup.connections.securityGroups);
 
@@ -118,6 +121,15 @@ export class Cluster extends cdk.Construct implements ICluster {
       "logs:CreateLogStream",
       "logs:PutLogEvents"
     ).addAllResources());
+
+    // 0 disables, otherwise forward to underlying implementation which picks the sane default
+    if (options.taskDrainTimeSeconds !== 0) {
+      new InstanceDrainHook(autoScalingGroup, 'DrainECSHook', {
+        autoScalingGroup,
+        cluster: this,
+        drainTimeSec: options.taskDrainTimeSeconds
+      });
+    }
   }
 
   /**
@@ -130,9 +142,10 @@ export class Cluster extends cdk.Construct implements ICluster {
   /**
    * Export the Cluster
    */
-  public export(): ImportedClusterProps {
+  public export(): ClusterImportProps {
     return {
       clusterName: new cdk.Output(this, 'ClusterName', { value: this.clusterName }).makeImportValue().toString(),
+      clusterArn: this.clusterArn,
       vpc: this.vpc.export(),
       securityGroups: this.connections.securityGroups.map(sg => sg.export()),
       hasEc2Capacity: this.hasEc2Capacity,
@@ -170,18 +183,37 @@ export class Cluster extends cdk.Construct implements ICluster {
   }
 }
 
+export interface EcsOptimizedAmiProps {
+  /**
+   * What generation of Amazon Linux to use
+   *
+   * @default AmazonLinux
+   */
+  generation?: ec2.AmazonLinuxGeneration;
+}
+
 /**
  * Construct a Linux machine image from the latest ECS Optimized AMI published in SSM
  */
-export class EcsOptimizedAmi implements ec2.IMachineImageSource  {
-  private static AmiParameterName = "/aws/service/ecs/optimized-ami/amazon-linux/recommended";
+export class EcsOptimizedAmi implements ec2.IMachineImageSource {
+  private readonly generation: ec2.AmazonLinuxGeneration;
+  private readonly amiParameterName: string;
+
+  constructor(props?: EcsOptimizedAmiProps) {
+    this.generation = (props && props.generation) || ec2.AmazonLinuxGeneration.AmazonLinux;
+    if (this.generation === ec2.AmazonLinuxGeneration.AmazonLinux2) {
+      this.amiParameterName = "/aws/service/ecs/optimized-ami/amazon-linux-2/recommended";
+    } else {
+      this.amiParameterName = "/aws/service/ecs/optimized-ami/amazon-linux/recommended";
+    }
+  }
 
   /**
    * Return the correct image
    */
-  public getImage(parent: cdk.Construct): ec2.MachineImage {
-    const ssmProvider = new cdk.SSMParameterProvider(parent, {
-        parameterName: EcsOptimizedAmi.AmiParameterName
+  public getImage(scope: cdk.Construct): ec2.MachineImage {
+    const ssmProvider = new cdk.SSMParameterProvider(scope, {
+      parameterName: this.amiParameterName
     });
 
     const json = ssmProvider.parameterValue("{\"image_id\": \"\"}");
@@ -194,16 +226,21 @@ export class EcsOptimizedAmi implements ec2.IMachineImageSource  {
 /**
  * An ECS cluster
  */
-export interface ICluster {
+export interface ICluster extends cdk.IConstruct {
   /**
    * Name of the cluster
    */
   readonly clusterName: string;
 
   /**
+   * The ARN of this cluster
+   */
+  readonly clusterArn: string;
+
+  /**
    * VPC that the cluster instances are running in
    */
-  readonly vpc: ec2.VpcNetworkRef;
+  readonly vpc: ec2.IVpcNetwork;
 
   /**
    * Connections manager of the cluster instances
@@ -214,26 +251,38 @@ export interface ICluster {
    * Whether the cluster has EC2 capacity associated with it
    */
   readonly hasEc2Capacity: boolean;
+
+  /**
+   * Export the Cluster
+   */
+  export(): ClusterImportProps;
 }
 
 /**
  * Properties to import an ECS cluster
  */
-export interface ImportedClusterProps {
+export interface ClusterImportProps {
   /**
    * Name of the cluster
    */
   clusterName: string;
 
   /**
+   * ARN of the cluster
+   *
+   * @default Derived from clusterName
+   */
+  clusterArn?: string;
+
+  /**
    * VPC that the cluster instances are running in
    */
-  vpc: ec2.VpcNetworkRefProps;
+  vpc: ec2.VpcNetworkImportProps;
 
   /**
    * Security group of the cluster instances
    */
-  securityGroups: ec2.SecurityGroupRefProps[];
+  securityGroups: ec2.SecurityGroupImportProps[];
 
   /**
    * Whether the given cluster has EC2 capacity
@@ -253,9 +302,14 @@ class ImportedCluster extends cdk.Construct implements ICluster {
   public readonly clusterName: string;
 
   /**
+   * ARN of the cluster
+   */
+  public readonly clusterArn: string;
+
+  /**
    * VPC that the cluster instances are running in
    */
-  public readonly vpc: ec2.VpcNetworkRef;
+  public readonly vpc: ec2.IVpcNetwork;
 
   /**
    * Security group of the cluster instances
@@ -267,17 +321,27 @@ class ImportedCluster extends cdk.Construct implements ICluster {
    */
   public readonly hasEc2Capacity: boolean;
 
-  constructor(parent: cdk.Construct, name: string, props: ImportedClusterProps) {
-    super(parent, name);
+  constructor(scope: cdk.Construct, id: string, private readonly props: ClusterImportProps) {
+    super(scope, id);
     this.clusterName = props.clusterName;
-    this.vpc = ec2.VpcNetworkRef.import(this, "vpc", props.vpc);
+    this.vpc = ec2.VpcNetwork.import(this, "vpc", props.vpc);
     this.hasEc2Capacity = props.hasEc2Capacity !== false;
+
+    this.clusterArn = props.clusterArn !== undefined ? props.clusterArn : this.node.stack.formatArn({
+      service: 'ecs',
+      resource: 'cluster',
+      resourceName: props.clusterName,
+    });
 
     let i = 1;
     for (const sgProps of props.securityGroups) {
-      this.connections.addSecurityGroup(ec2.SecurityGroupRef.import(this, `SecurityGroup${i}`, sgProps));
+      this.connections.addSecurityGroup(ec2.SecurityGroup.import(this, `SecurityGroup${i}`, sgProps));
       i++;
     }
+  }
+
+  public export() {
+    return this.props;
   }
 }
 
@@ -291,22 +355,27 @@ export interface AddAutoScalingGroupCapacityOptions {
    * @default false
    */
   containersAccessInstanceRole?: boolean;
+
+  /**
+   * Give tasks this many seconds to complete when instances are being scaled in.
+   *
+   * Task draining adds a Lambda and a Lifecycle hook to your AutoScalingGroup
+   * that will delay instance termination until all ECS tasks have drained from
+   * the instance.
+   *
+   * Set to 0 to disable task draining.
+   *
+   * @default 300
+   */
+  taskDrainTimeSeconds?: number;
 }
 
 /**
  * Properties for adding autoScalingGroup
  */
-export interface AddDefaultAutoScalingGroupOptions {
-
+export interface AddCapacityOptions extends AddAutoScalingGroupCapacityOptions, autoscaling.CommonAutoScalingGroupProps {
   /**
    * The type of EC2 instance to launch into your Autoscaling Group
    */
   instanceType: ec2.InstanceType;
-
-  /**
-   * Number of container instances registered in your ECS Cluster
-   *
-   * @default 1
-   */
-  instanceCount?: number;
 }

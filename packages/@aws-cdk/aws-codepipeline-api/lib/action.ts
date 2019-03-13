@@ -37,51 +37,20 @@ export function defaultBounds(): ActionArtifactBounds {
 }
 
 /**
- * The API of Stage used internally by the CodePipeline Construct.
- * You should never need to call any of the methods inside of it yourself.
- */
-export interface IInternalStage {
-  /**
-   * Adds an Action to this Stage.
-   *
-   * @param action the Action to add to this Stage
-   */
-  _attachAction(action: Action): void;
-
-  /**
-   * Generates a unique output artifact name for the given Action.
-   *
-   * @param action the Action to generate the output artifact name for
-   */
-  _generateOutputArtifactName(action: Action): string;
-
-  /**
-   * Finds an input artifact for the given Action.
-   * The chosen artifact will be the output artifact of the
-   * last Action in the Pipeline
-   * (up to the Stage this Action belongs to)
-   * with the highest runOrder that has an output artifact.
-   *
-   * @param action the Action to find the input artifact for
-   */
-  _findInputArtifact(action: Action): Artifact;
-}
-
-/**
  * The abstract view of an AWS CodePipeline as required and used by Actions.
  * It extends {@link events.IEventRuleTarget},
  * so this interface can be used as a Target for CloudWatch Events.
  */
-export interface IPipeline extends events.IEventRuleTarget {
+export interface IPipeline extends cdk.IConstruct, events.IEventRuleTarget {
+  /**
+   * The name of the Pipeline.
+   */
+  readonly pipelineName: string;
+
   /**
    * The ARN of the Pipeline.
    */
   readonly pipelineArn: string;
-
-  /**
-   * The unique ID of the Pipeline Construct.
-   */
-  readonly uniqueId: string;
 
   /**
    * The service Role of the Pipeline.
@@ -110,24 +79,28 @@ export interface IStage {
   /**
    * The physical, human-readable name of this Pipeline Stage.
    */
-  readonly name: string;
+  readonly stageName: string;
 
   /**
    * The Pipeline this Stage belongs to.
    */
   readonly pipeline: IPipeline;
 
-  /**
-   * The API of Stage used internally by the CodePipeline Construct.
-   * You should never need to call any of the methods inside of it yourself.
-   */
-  readonly _internal: IInternalStage;
+  addAction(action: Action): void;
+
+  onStateChange(name: string, target?: events.IEventRuleTarget, options?: events.EventRuleProps): events.EventRule;
 }
 
 /**
  * Common properties shared by all Actions.
  */
 export interface CommonActionProps {
+  /**
+   * The physical, human-readable name of the Action.
+   * Not that Action names must be unique within a single Stage.
+   */
+  actionName: string;
+
   /**
    * The runOrder property for this Action.
    * RunOrder determines the relative order in which multiple Actions in the same Stage execute.
@@ -139,19 +112,9 @@ export interface CommonActionProps {
 }
 
 /**
- * Common properties shared by all Action Constructs.
- */
-export interface CommonActionConstructProps {
-  /**
-   * The Pipeline Stage to add this Action to.
-   */
-  stage: IStage;
-}
-
-/**
  * Construction properties of the low-level {@link Action Action class}.
  */
-export interface ActionProps extends CommonActionProps, CommonActionConstructProps {
+export interface ActionProps extends CommonActionProps {
   category: ActionCategory;
   provider: string;
 
@@ -161,6 +124,15 @@ export interface ActionProps extends CommonActionProps, CommonActionConstructPro
    * @default the Action resides in the same region as the Pipeline
    */
   region?: string;
+
+  /**
+   * The service role that is assumed during execution of action.
+   * This role is not mandatory, however more advanced configuration
+   * may require specifying it.
+   *
+   * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codepipeline-pipeline-stages-actions.html
+   */
+  role?: iam.IRole;
 
   artifactBounds: ActionArtifactBounds;
   configuration?: any;
@@ -173,7 +145,7 @@ export interface ActionProps extends CommonActionProps, CommonActionConstructPro
  * It is recommended that concrete types are used instead, such as {@link codecommit.PipelineSourceAction} or
  * {@link codebuild.PipelineBuildAction}.
  */
-export abstract class Action extends cdk.Construct {
+export abstract class Action {
   /**
    * The category of the action.
    * The category defines which action type the owner
@@ -206,6 +178,15 @@ export abstract class Action extends cdk.Construct {
   public readonly configuration?: any;
 
   /**
+   * The service role that is assumed during execution of action.
+   * This role is not mandatory, however more advanced configuration
+   * may require specifying it.
+   *
+   * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codepipeline-pipeline-stages-actions.html
+   */
+  public readonly role?: iam.IRole;
+
+  /**
    * The order in which AWS CodePipeline runs this action.
    * For more information, see the AWS CodePipeline User Guide.
    *
@@ -215,16 +196,17 @@ export abstract class Action extends cdk.Construct {
 
   public readonly owner: string;
   public readonly version: string;
+  public readonly actionName: string;
 
-  private readonly inputArtifacts = new Array<Artifact>();
-  private readonly outputArtifacts = new Array<Artifact>();
+  private readonly _actionInputArtifacts = new Array<Artifact>();
+  private readonly _actionOutputArtifacts = new Array<Artifact>();
   private readonly artifactBounds: ActionArtifactBounds;
-  private readonly stage: IStage;
 
-  constructor(parent: cdk.Construct, id: string, props: ActionProps) {
-    super(parent, id);
+  private _stage?: IStage;
+  private _scope?: cdk.Construct;
 
-    validation.validateName('Action', id);
+  constructor(props: ActionProps) {
+    validation.validateName('Action', props.actionName);
 
     this.owner = props.owner || 'AWS';
     this.version = props.version || '1';
@@ -234,57 +216,101 @@ export abstract class Action extends cdk.Construct {
     this.configuration = props.configuration;
     this.artifactBounds = props.artifactBounds;
     this.runOrder = props.runOrder === undefined ? 1 : props.runOrder;
-    this.stage = props.stage;
-
-    this.stage._internal._attachAction(this);
-  }
-
-  public validate(): string[] {
-    return validation.validateArtifactBounds('input', this.inputArtifacts, this.artifactBounds.minInputs,
-        this.artifactBounds.maxInputs, this.category, this.provider)
-      .concat(validation.validateArtifactBounds('output', this.outputArtifacts, this.artifactBounds.minOutputs,
-        this.artifactBounds.maxOutputs, this.category, this.provider)
-    );
+    this.actionName = props.actionName;
+    this.role = props.role;
   }
 
   public onStateChange(name: string, target?: events.IEventRuleTarget, options?: events.EventRuleProps) {
-    const rule = new events.EventRule(this.parent!!, name, options);
+    const rule = new events.EventRule(this.scope, name, options);
     rule.addTarget(target);
     rule.addEventPattern({
       detailType: [ 'CodePipeline Stage Execution State Change' ],
       source: [ 'aws.codepipeline' ],
       resources: [ this.stage.pipeline.pipelineArn ],
       detail: {
-        stage: [ this.stage.name ],
-        action: [ this.id ],
+        stage: [ this.stage.stageName ],
+        action: [ this.actionName ],
       },
     });
     return rule;
   }
 
   public get _inputArtifacts(): Artifact[] {
-    return this.inputArtifacts.slice();
+    return this._actionInputArtifacts.slice();
   }
 
   public get _outputArtifacts(): Artifact[] {
-    return this.outputArtifacts.slice();
+    return this._actionOutputArtifacts.slice();
   }
 
-  protected addOutputArtifact(name: string = this.stage._internal._generateOutputArtifactName(this)): Artifact {
-    const artifact = new Artifact(this, name);
-    this.outputArtifacts.push(artifact);
+  protected validate(): string[] {
+    return validation.validateArtifactBounds('input', this._actionInputArtifacts, this.artifactBounds.minInputs,
+        this.artifactBounds.maxInputs, this.category, this.provider)
+      .concat(validation.validateArtifactBounds('output', this._actionOutputArtifacts, this.artifactBounds.minOutputs,
+        this.artifactBounds.maxOutputs, this.category, this.provider)
+    );
+  }
+
+  protected addOutputArtifact(name: string): Artifact {
+    const artifact = new Artifact(name);
+    this._actionOutputArtifacts.push(artifact);
     return artifact;
   }
 
-  protected addInputArtifact(artifact: Artifact = this.stage._internal._findInputArtifact(this)): Action {
-    this.inputArtifacts.push(artifact);
+  protected addInputArtifact(artifact: Artifact): Action {
+    this._actionInputArtifacts.push(artifact);
     return this;
+  }
+
+  /**
+   * Retrieves the Construct scope of this Action.
+   * Only available after the Action has been added to a Stage,
+   * and that Stage to a Pipeline.
+   */
+  protected get scope(): cdk.Construct {
+    if (this._scope) {
+      return this._scope;
+    } else {
+      throw new Error('Action must be added to a stage that is part of a pipeline first');
+    }
+  }
+
+  /**
+   * The method called when an Action is attached to a Pipeline.
+   * This method is guaranteed to be called only once for each Action instance.
+   *
+   * @param stage the stage this action has been added to
+   *   (includes a reference to the pipeline as well)
+   * @param scope the scope construct for this action,
+   *   can be used by the action implementation to create any resources it needs to work correctly
+   */
+  protected abstract bind(stage: IStage, scope: cdk.Construct): void;
+
+  // ignore unused private method (it's actually used in Stage)
+  // @ts-ignore
+  private _attachActionToPipeline(stage: IStage, scope: cdk.Construct): void {
+    if (this._stage) {
+      throw new Error(`Action '${this.actionName}' has been added to a pipeline twice`);
+    }
+
+    this._stage = stage;
+    this._scope = scope;
+
+    this.bind(stage, scope);
+  }
+
+  private get stage(): IStage {
+    if (this._stage) {
+      return this._stage;
+    } else {
+      throw new Error('Action must be added to a stage that is part of a pipeline before using onStateChange');
+    }
   }
 }
 
 // export class ElasticBeanstalkDeploy extends DeployAction {
-//   constructor(parent: Stage, name: string, applicationName: string, environmentName: string) {
-//     super(parent, name, 'ElasticBeanstalk', { minInputs: 1, maxInputs: 1, minOutputs: 0, maxOutputs: 0 }, {
+//   constructor(scope: Stage, id: string, applicationName: string, environmentName: string) {
+//     super(scope, id, 'ElasticBeanstalk', { minInputs: 1, maxInputs: 1, minOutputs: 0, maxOutputs: 0 }, {
 //       ApplicationName: applicationName,
 //       EnvironmentName: environmentName
 //     });
@@ -292,8 +318,8 @@ export abstract class Action extends cdk.Construct {
 // }
 
 // export class OpsWorksDeploy extends DeployAction {
-//   constructor(parent: Stage, name: string, app: string, stack: string, layer?: string) {
-//     super(parent, name, 'OpsWorks', { minInputs: 1, maxInputs: 1, minOutputs: 0, maxOutputs: 0 }, {
+//   constructor(scope: Stage, id: string, app: string, stack: string, layer?: string) {
+//     super(scope, id, 'OpsWorks', { minInputs: 1, maxInputs: 1, minOutputs: 0, maxOutputs: 0 }, {
 //       Stack: stack,
 //       App: app,
 //       Layer: layer,
@@ -302,63 +328,11 @@ export abstract class Action extends cdk.Construct {
 // }
 
 // export class ECSDeploy extends DeployAction {
-//   constructor(parent: Stage, name: string, clusterName: string, serviceName: string, fileName?: string) {
-//     super(parent, name, 'ECS', { minInputs: 1, maxInputs: 1, minOutputs: 0, maxOutputs: 0 }, {
+//   constructor(scope: Stage, id: string, clusterName: string, serviceName: string, fileName?: string) {
+//     super(scope, id, 'ECS', { minInputs: 1, maxInputs: 1, minOutputs: 0, maxOutputs: 0 }, {
 //       ClusterName: clusterName,
 //       ServiceName: serviceName,
 //       FileName: fileName,
-//     });
-//   }
-// }
-
-/*
-  TODO: A Jenkins build needs a corresponding custom action for each "Jenkins provider".
-    This should be created automatically.
-
-  Example custom action created to execute Jenkins:
-  {
-  "id": {
-    "category": "Test",
-    "provider": "<provider name>",
-    "owner": "Custom",
-    "version": "1"
-  },
-  "outputArtifactDetails": {
-    "minimumCount": 0,
-    "maximumCount": 5
-  },
-  "settings": {
-    "executionUrlTemplate": "https://www.google.com/job/{Config:ProjectName}/{ExternalExecutionId}",
-    "entityUrlTemplate": "https://www.google.com/job/{Config:ProjectName}"
-  },
-  "actionConfigurationProperties": [
-    {
-      "queryable": true,
-      "key": true,
-      "name": "ProjectName",
-      "required": true,
-      "secret": false
-    }
-  ],
-  "inputArtifactDetails": {
-    "minimumCount": 0,
-    "maximumCount": 5
-  }
-  }
-*/
-
-// export class JenkinsBuild extends BuildAction {
-//   constructor(parent: Stage, name: string, jenkinsProvider: string, project: string) {
-//     super(parent, name, jenkinsProvider, DefaultBounds(), {
-//       ProjectName: project
-//     });
-//   }
-// }
-
-// export class JenkinsTest extends TestAction {
-//   constructor(parent: Stage, name: string, jenkinsProvider: string, project: string) {
-//     super(parent, name, jenkinsProvider, DefaultBounds(), {
-//       ProjectName: project
 //     });
 //   }
 // }

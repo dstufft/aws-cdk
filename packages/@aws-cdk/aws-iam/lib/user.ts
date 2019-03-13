@@ -1,6 +1,6 @@
 import { Construct } from '@aws-cdk/cdk';
 import { Group } from './group';
-import { cloudformation } from './iam.generated';
+import { CfnUser } from './iam.generated';
 import { IPrincipal, Policy } from './policy';
 import { ArnPrincipal, PolicyPrincipal, PolicyStatement } from './policy-document';
 import { AttachedPolicies, undefinedIfEmpty } from './util';
@@ -84,10 +84,10 @@ export class User extends Construct implements IPrincipal {
   private readonly attachedPolicies = new AttachedPolicies();
   private defaultPolicy?: Policy;
 
-  constructor(parent: Construct, name: string, props: UserProps = {}) {
-    super(parent, name);
+  constructor(scope: Construct, id: string, props: UserProps = {}) {
+    super(scope, id);
 
-    const user = new cloudformation.UserResource(this, 'Resource', {
+    const user = new CfnUser(this, 'Resource', {
       userName: props.userName,
       groups: undefinedIfEmpty(() => this.groups),
       managedPolicyArns: undefinedIfEmpty(() => this.managedPolicyArns),
@@ -139,7 +139,7 @@ export class User extends Construct implements IPrincipal {
     this.defaultPolicy.addStatement(statement);
   }
 
-  private parseLoginProfile(props: UserProps): cloudformation.UserResource.LoginProfileProperty | undefined {
+  private parseLoginProfile(props: UserProps): CfnUser.LoginProfileProperty | undefined {
     if (props.password) {
       return {
         password: props.password,

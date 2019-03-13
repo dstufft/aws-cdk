@@ -9,7 +9,17 @@
               "Action": "sts:AssumeRole",
               "Effect": "Allow",
               "Principal": {
-                "Service": "lambda.amazonaws.com"
+                "Service": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "lambda.",
+                      {
+                        "Ref": "AWS::URLSuffix"
+                      }
+                    ]
+                  ]
+                }
               }
             }
           ],
@@ -203,7 +213,17 @@
               "Action": "sts:AssumeRole",
               "Effect": "Allow",
               "Principal": {
-                "Service": "lambda.amazonaws.com"
+                "Service": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "lambda.",
+                      {
+                        "Ref": "AWS::URLSuffix"
+                      }
+                    ]
+                  ]
+                }
               }
             }
           ],
@@ -397,7 +417,17 @@
               "Action": "sts:AssumeRole",
               "Effect": "Allow",
               "Principal": {
-                "Service": "lambda.amazonaws.com"
+                "Service": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "lambda.",
+                      {
+                        "Ref": "AWS::URLSuffix"
+                      }
+                    ]
+                  ]
+                }
               }
             }
           ],
@@ -526,12 +556,12 @@
       },
       "DependsOn": [
         "booksapiANYF4F0CDEB",
-        "booksapibooks97D84727",
+        "booksapibooksbookidDELETE214F4059",
+        "booksapibooksbookidGETCCE21986",
+        "booksapibooksbookid5264BCA2",
         "booksapibooksGETA776447A",
         "booksapibooksPOSTF6C6559D",
-        "booksapibooksbookid5264BCA2",
-        "booksapibooksbookidGETCCE21986",
-        "booksapibooksbookidDELETE214F4059"
+        "booksapibooks97D84727"
       ]
     },
     "booksapiDeploymentStageprod55D8E03E": {
@@ -555,7 +585,17 @@
               "Action": "sts:AssumeRole",
               "Effect": "Allow",
               "Principal": {
-                "Service": "apigateway.amazonaws.com"
+                "Service": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "apigateway.",
+                      {
+                        "Ref": "AWS::URLSuffix"
+                      }
+                    ]
+                  ]
+                }
               }
             }
           ],
@@ -836,16 +876,17 @@
             {
               "Ref": "AWS::Region"
             },
-            ".amazonaws.com/",
+            ".",
+            {
+              "Ref": "AWS::URLSuffix"
+            },
+            "/",
             {
               "Ref": "booksapiDeploymentStageprod55D8E03E"
             },
             "/"
           ]
         ]
-      },
-      "Export": {
-        "Name": "restapi-books-example:booksapiEndpointE230E8D5"
       }
     }
   }

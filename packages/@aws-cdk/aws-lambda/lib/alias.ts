@@ -1,8 +1,8 @@
 import iam = require('@aws-cdk/aws-iam');
 import cdk = require('@aws-cdk/cdk');
-import { FunctionRef } from './lambda-ref';
-import { FunctionVersion } from './lambda-version';
-import { cloudformation } from './lambda.generated';
+import { FunctionBase, FunctionImportProps, IFunction } from './function-base';
+import { Version } from './lambda-version';
+import { CfnAlias } from './lambda.generated';
 import { Permission } from './permission';
 
 /**
@@ -21,7 +21,7 @@ export interface AliasProps {
    *
    * Use lambda.addVersion() to obtain a new lambda version to refer to.
    */
-  version: FunctionVersion;
+  version: Version;
 
   /**
    * Name of this alias
@@ -51,7 +51,7 @@ export interface AliasProps {
 /**
  * A new alias to a particular version of a Lambda function.
  */
-export class Alias extends FunctionRef {
+export class Alias extends FunctionBase {
   /**
    * ARN of this alias
    *
@@ -71,21 +71,21 @@ export class Alias extends FunctionRef {
   /**
    * Role associated with this alias
    */
-  public readonly role?: iam.Role | undefined;
+  public readonly role?: iam.IRole | undefined;
 
   protected readonly canCreatePermissions: boolean = true; // Not used anyway
 
   /**
    * The actual Lambda function object that this Alias is pointing to
    */
-  private readonly underlyingLambda: FunctionRef;
+  private readonly underlyingLambda: IFunction;
 
-  constructor(parent: cdk.Construct, name: string, props: AliasProps) {
-    super(parent, name);
+  constructor(scope: cdk.Construct, id: string, props: AliasProps) {
+    super(scope, id);
 
     this.underlyingLambda = props.version.lambda;
 
-    const alias = new cloudformation.AliasResource(this, 'Resource', {
+    new CfnAlias(this, 'Resource', {
       name: props.aliasName,
       description: props.description,
       functionName: this.underlyingLambda.functionName,
@@ -95,8 +95,14 @@ export class Alias extends FunctionRef {
 
     // Not actually the name, but an ARN can be used in all places
     // where the name is expected, and an ARN can refer to an Alias.
-    this.functionName = alias.ref;
-    this.functionArn = alias.aliasArn;
+    this.functionName = `${props.version.lambda.functionArn}:${props.aliasName}`;
+    this.functionArn = `${props.version.lambda.functionArn}:${props.aliasName}`;
+  }
+
+  public export(): FunctionImportProps {
+    return {
+      functionArn: new cdk.Output(this, 'AliasArn', { value: this.functionArn }).makeImportValue().toString()
+    };
   }
 
   public addPermission(name: string, permission: Permission) {
@@ -148,7 +154,7 @@ export interface VersionWeight {
   /**
    * The version to route traffic to
    */
-  readonly version: FunctionVersion;
+  readonly version: Version;
 
   /**
    * How much weight to assign to this version (0..1)

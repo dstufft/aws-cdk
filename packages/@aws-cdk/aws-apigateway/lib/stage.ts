@@ -1,7 +1,7 @@
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from './apigateway.generated';
+import { CfnStage } from './apigateway.generated';
 import { Deployment } from './deployment';
-import { RestApiRef } from './restapi-ref';
+import { IRestApi } from './restapi';
 import { parseMethodOptionsPath } from './util';
 
 export interface StageOptions extends MethodDeploymentOptions {
@@ -12,6 +12,12 @@ export interface StageOptions extends MethodDeploymentOptions {
    * @default "prod"
    */
   stageName?: string;
+
+  /**
+   * Specifies whether Amazon X-Ray tracing is enabled for this method.
+   * @default false
+   */
+  tracingEnabled?: boolean;
 
   /**
    * Indicates whether cache clustering is enabled for the stage.
@@ -126,14 +132,13 @@ export interface MethodDeploymentOptions {
   cacheDataEncrypted?: boolean;
 }
 
-export class Stage extends cdk.Construct implements cdk.IDependable {
+export class Stage extends cdk.Construct {
   public readonly stageName: string;
-  public readonly dependencyElements = new Array<cdk.IDependable>();
 
-  private readonly restApi: RestApiRef;
+  private readonly restApi: IRestApi;
 
-  constructor(parent: cdk.Construct, id: string, props: StageProps) {
-    super(parent, id);
+  constructor(scope: cdk.Construct, id: string, props: StageProps) {
+    super(scope, id);
 
     const methodSettings = this.renderMethodSettings(props);
 
@@ -147,7 +152,7 @@ export class Stage extends cdk.Construct implements cdk.IDependable {
     }
 
     const cacheClusterSize = props.cacheClusterEnabled ? (props.cacheClusterSize || '0.5') : undefined;
-    const resource = new cloudformation.StageResource(this, 'Resource', {
+    const resource = new CfnStage(this, 'Resource', {
       stageName: props.stageName || 'prod',
       cacheClusterEnabled: props.cacheClusterEnabled,
       cacheClusterSize,
@@ -157,12 +162,12 @@ export class Stage extends cdk.Construct implements cdk.IDependable {
       description: props.description,
       documentationVersion: props.documentationVersion,
       variables: props.variables,
+      tracingEnabled: props.tracingEnabled,
       methodSettings,
     });
 
     this.stageName = resource.ref;
     this.restApi = props.deployment.api;
-    this.dependencyElements.push(resource);
   }
 
   /**
@@ -173,11 +178,11 @@ export class Stage extends cdk.Construct implements cdk.IDependable {
     if (!path.startsWith('/')) {
       throw new Error(`Path must begin with "/": ${path}`);
     }
-    return `https://${this.restApi.restApiId}.execute-api.${new cdk.AwsRegion()}.amazonaws.com/${this.stageName}${path}`;
+    return `https://${this.restApi.restApiId}.execute-api.${this.node.stack.region}.${this.node.stack.urlSuffix}/${this.stageName}${path}`;
   }
 
-  private renderMethodSettings(props: StageProps): cloudformation.StageResource.MethodSettingProperty[] | undefined {
-    const settings = new Array<cloudformation.StageResource.MethodSettingProperty>();
+  private renderMethodSettings(props: StageProps): CfnStage.MethodSettingProperty[] | undefined {
+    const settings = new Array<CfnStage.MethodSettingProperty>();
 
     // extract common method options from the stage props
     const commonMethodOptions: MethodDeploymentOptions = {
@@ -205,7 +210,7 @@ export class Stage extends cdk.Construct implements cdk.IDependable {
 
     return settings.length === 0 ? undefined : settings;
 
-    function renderEntry(path: string, options: MethodDeploymentOptions): cloudformation.StageResource.MethodSettingProperty {
+    function renderEntry(path: string, options: MethodDeploymentOptions): CfnStage.MethodSettingProperty {
       if (options.cachingEnabled) {
         if (props.cacheClusterEnabled === undefined) {
           props.cacheClusterEnabled = true;

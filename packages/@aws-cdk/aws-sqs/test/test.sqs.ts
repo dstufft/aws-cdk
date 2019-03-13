@@ -2,7 +2,7 @@ import { expect, haveResource } from '@aws-cdk/assert';
 import iam = require('@aws-cdk/aws-iam');
 import kms = require('@aws-cdk/aws-kms');
 import s3 = require('@aws-cdk/aws-s3');
-import { resolve, Stack } from '@aws-cdk/cdk';
+import { Stack } from '@aws-cdk/cdk';
 import { Test } from 'nodeunit';
 import sqs = require('../lib');
 import { Queue } from '../lib';
@@ -98,13 +98,13 @@ export = {
 
     // WHEN
     const ref = queue.export();
-    const imports = sqs.QueueRef.import(stack, 'Imported', ref);
+    const imports = sqs.Queue.import(stack, 'Imported', ref);
 
     // THEN
 
-    // "import" returns a a QueueRef bound to `Fn::ImportValue`s.
-    test.deepEqual(resolve(imports.queueArn), { 'Fn::ImportValue': 'QueueQueueArn8CF496D5' });
-    test.deepEqual(resolve(imports.queueUrl), { 'Fn::ImportValue': 'QueueQueueUrlC30FF916' });
+    // "import" returns an IQueue bound to `Fn::ImportValue`s.
+    test.deepEqual(stack.node.resolve(imports.queueArn), { 'Fn::ImportValue': 'QueueQueueArn8CF496D5' });
+    test.deepEqual(stack.node.resolve(imports.queueUrl), { 'Fn::ImportValue': 'QueueQueueUrlC30FF916' });
 
     // the exporting stack has Outputs for QueueARN and QueueURL
     const outputs = stack.toCloudFormation().Outputs;
@@ -158,7 +158,7 @@ export = {
     'grants also work on imported queues'(test: Test) {
       const stack = new Stack();
       const queue = Queue.import(stack, 'Import', {
-        queueArn: 'imported-queue-arn',
+        queueArn: 'arn:aws:sqs:us-east-1:123456789012:queue1',
         queueUrl: 'https://queue-url'
       });
 
@@ -176,7 +176,7 @@ export = {
                 "sqs:GetQueueUrl"
               ],
               "Effect": "Allow",
-              "Resource": "imported-queue-arn"
+              "Resource": "arn:aws:sqs:us-east-1:123456789012:queue1"
             }
           ],
           "Version": "2012-10-17"
@@ -246,7 +246,7 @@ export = {
 
         const exportCustom = customKey.export();
 
-        test.deepEqual(resolve(exportCustom), {
+        test.deepEqual(stack.node.resolve(exportCustom), {
           queueArn: { 'Fn::ImportValue': 'QueueWithCustomKeyQueueArnD326BB9B' },
           queueUrl: { 'Fn::ImportValue': 'QueueWithCustomKeyQueueUrlF07DDC70' },
           keyArn: { 'Fn::ImportValue': 'QueueWithCustomKeyKeyArn537F6E42' }
@@ -294,7 +294,7 @@ export = {
 
         const exportManaged = managedKey.export();
 
-        test.deepEqual(resolve(exportManaged), {
+        test.deepEqual(stack.node.resolve(exportManaged), {
           queueArn: { 'Fn::ImportValue': 'QueueWithManagedKeyQueueArn8798A14E' },
           queueUrl: { 'Fn::ImportValue': 'QueueWithManagedKeyQueueUrlD735C981' },
           keyArn: { 'Fn::ImportValue': 'QueueWithManagedKeyKeyArn9C42A85D' }
@@ -362,7 +362,9 @@ export = {
           },
           "Effect": "Allow",
           "Principal": {
-            "Service": "s3.amazonaws.com"
+            "Service": {
+              "Fn::Join": ["", ["s3.", { Ref: "AWS::URLSuffix" }]]
+            }
           },
           "Resource": {
             "Fn::GetAtt": [
@@ -463,7 +465,9 @@ export = {
           ],
           "Effect": "Allow",
           "Principal": {
-            "Service": "s3.amazonaws.com"
+            "Service": {
+              "Fn::Join": ["", ["s3.", { Ref: "AWS::URLSuffix" }]]
+            }
           },
           "Resource": "*"
           }
@@ -484,6 +488,31 @@ export = {
       test.done();
     }
 
+  },
+
+  'test metrics'(test: Test) {
+    // GIVEN
+    const stack = new Stack();
+    const topic = new Queue(stack, 'Queue');
+
+    // THEN
+    test.deepEqual(stack.node.resolve(topic.metricNumberOfMessagesSent()), {
+      dimensions: {QueueName: { 'Fn::GetAtt': [ 'Queue4A7E3555', 'QueueName' ] }},
+      namespace: 'AWS/SQS',
+      metricName: 'NumberOfMessagesSent',
+      periodSec: 300,
+      statistic: 'Sum'
+    });
+
+    test.deepEqual(stack.node.resolve(topic.metricSentMessageSize()), {
+      dimensions: {QueueName: { 'Fn::GetAtt': [ 'Queue4A7E3555', 'QueueName' ] }},
+      namespace: 'AWS/SQS',
+      metricName: 'SentMessageSize',
+      periodSec: 300,
+      statistic: 'Average'
+    });
+
+    test.done();
   }
 };
 

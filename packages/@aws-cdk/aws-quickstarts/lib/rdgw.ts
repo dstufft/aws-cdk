@@ -1,10 +1,10 @@
-import { cloudformation } from '@aws-cdk/aws-cloudformation';
+import { CfnStack } from '@aws-cdk/aws-cloudformation';
 import ec2 = require('@aws-cdk/aws-ec2');
 import cdk = require('@aws-cdk/cdk');
 
 export interface RemoteDesktopGatewayProps {
   rdgwCIDR: string;
-  vpc: ec2.VpcNetworkRef;
+  vpc: ec2.IVpcNetwork;
   keyPairName: string;
 
   adminPassword: string;
@@ -24,8 +24,8 @@ export class RemoteDesktopGateway extends cdk.Construct implements ec2.IConnecta
   private static readonly PORT = 3389;
   public readonly connections: ec2.Connections;
 
-  constructor(parent: cdk.Construct, name: string, props: RemoteDesktopGatewayProps) {
-    super(parent, name);
+  constructor(scope: cdk.Construct, id: string, props: RemoteDesktopGatewayProps) {
+    super(scope, id);
 
     const params: any = {
       RDGWCIDR: props.rdgwCIDR,
@@ -42,12 +42,12 @@ export class RemoteDesktopGateway extends cdk.Construct implements ec2.IConnecta
       RDGWInstanceType: props.rdgwInstanceType,
     };
 
-    const nestedStack = new cloudformation.StackResource(this, 'Resource', {
+    const nestedStack = new CfnStack(this, 'Resource', {
       templateUrl: 'https://s3.amazonaws.com/quickstart-reference/microsoft/rdgateway/latest/templates/rdgw-standalone.template',
       parameters: params
     });
 
-    const securityGroup = ec2.SecurityGroupRef.import(this, 'SecurityGroup', {
+    const securityGroup = ec2.SecurityGroup.import(this, 'SecurityGroup', {
       securityGroupId: nestedStack.getAtt('Outputs.RemoteDesktopGatewaySGID').toString()
     });
 

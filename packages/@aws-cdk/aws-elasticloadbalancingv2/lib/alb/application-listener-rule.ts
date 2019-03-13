@@ -1,5 +1,5 @@
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from '../elasticloadbalancingv2.generated';
+import { CfnListenerRule } from '../elasticloadbalancingv2.generated';
 import { IApplicationListener } from './application-listener';
 import { IApplicationTargetGroup } from './application-target-group';
 
@@ -57,24 +57,19 @@ export interface ApplicationListenerRuleProps extends BaseApplicationListenerRul
 /**
  * Define a new listener rule
  */
-export class ApplicationListenerRule extends cdk.Construct implements cdk.IDependable {
+export class ApplicationListenerRule extends cdk.Construct {
   /**
    * The ARN of this rule
    */
   public readonly listenerRuleArn: string;
-
-  /**
-   * The elements of this rule to add ordering dependencies on
-   */
-  public readonly dependencyElements: cdk.IDependable[] = [];
 
   private readonly conditions: {[key: string]: string[] | undefined} = {};
 
   private readonly actions: any[] = [];
   private readonly listener: IApplicationListener;
 
-  constructor(parent: cdk.Construct, id: string, props: ApplicationListenerRuleProps) {
-    super(parent, id);
+  constructor(scope: cdk.Construct, id: string, props: ApplicationListenerRuleProps) {
+    super(scope, id);
 
     if (!props.hostHeader && !props.pathPattern) {
       throw new Error(`At least one of 'hostHeader' or 'pathPattern' is required when defining a load balancing rule.`);
@@ -82,7 +77,7 @@ export class ApplicationListenerRule extends cdk.Construct implements cdk.IDepen
 
     this.listener = props.listener;
 
-    const resource = new cloudformation.ListenerRuleResource(this, 'Resource', {
+    const resource = new CfnListenerRule(this, 'Resource', {
       listenerArn: props.listener.listenerArn,
       priority: props.priority,
       conditions: new cdk.Token(() => this.renderConditions()),
@@ -98,7 +93,6 @@ export class ApplicationListenerRule extends cdk.Construct implements cdk.IDepen
 
     (props.targetGroups || []).forEach(this.addTargetGroup.bind(this));
 
-    this.dependencyElements.push(resource);
     this.listenerRuleArn = resource.ref;
   }
 
@@ -110,16 +104,6 @@ export class ApplicationListenerRule extends cdk.Construct implements cdk.IDepen
   }
 
   /**
-   * Validate the rule
-   */
-  public validate() {
-    if (this.actions.length === 0) {
-      return ['Listener rule needs at least one action'];
-    }
-    return [];
-  }
-
-  /**
    * Add a TargetGroup to load balance to
    */
   public addTargetGroup(targetGroup: IApplicationTargetGroup) {
@@ -128,6 +112,16 @@ export class ApplicationListenerRule extends cdk.Construct implements cdk.IDepen
       type: 'forward'
     });
     targetGroup.registerListener(this.listener, this);
+  }
+
+  /**
+   * Validate the rule
+   */
+  protected validate() {
+    if (this.actions.length === 0) {
+      return ['Listener rule needs at least one action'];
+    }
+    return [];
   }
 
   /**

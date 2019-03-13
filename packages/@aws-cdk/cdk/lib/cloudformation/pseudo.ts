@@ -1,61 +1,140 @@
-import { CloudFormationToken } from './cloudformation-token';
+import { Construct } from '../core/construct';
+import { Token } from '../core/tokens';
+import { CfnReference } from './cfn-tokens';
 
-export class PseudoParameter extends CloudFormationToken {
-  constructor(name: string) {
-    super({ Ref: name }, name);
+/**
+ * Accessor for pseudo parameters
+ *
+ * Since pseudo parameters need to be anchored to a stack somewhere in the
+ * construct tree, this class takes an scope parameter; the pseudo parameter
+ * values can be obtained as properties from an scoped object.
+ */
+export class Aws {
+  private constructor() {
+  }
+
+  public static get accountId(): string {
+    return new AwsAccountId(undefined).toString();
+  }
+
+  public static get urlSuffix(): string {
+    return new AwsURLSuffix(undefined).toString();
+  }
+
+  public static get notificationArns(): string[] {
+    return new AwsNotificationARNs(undefined).toList();
+  }
+
+  public static get partition(): string {
+    return new AwsPartition(undefined).toString();
+  }
+
+  public static get region(): string {
+    return new AwsRegion(undefined).toString();
+  }
+
+  public static get stackId(): string {
+    return new AwsStackId(undefined).toString();
+  }
+
+  public static get stackName(): string {
+    return new AwsStackName(undefined).toString();
+  }
+
+  public static get noValue(): string {
+    return new AwsNoValue().toString();
   }
 }
 
-export class AwsAccountId extends PseudoParameter {
-  constructor() {
-    super('AWS::AccountId');
+/**
+ * Accessor for scoped pseudo parameters
+ *
+ * These pseudo parameters are anchored to a stack somewhere in the construct
+ * tree, and their values will be exported automatically.
+ */
+export class ScopedAws {
+  constructor(private readonly scope?: Construct) {
+  }
+
+  public get accountId(): string {
+    return new AwsAccountId(this.scope).toString();
+  }
+
+  public get urlSuffix(): string {
+    return new AwsURLSuffix(this.scope).toString();
+  }
+
+  public get notificationArns(): string[] {
+    return new AwsNotificationARNs(this.scope).toList();
+  }
+
+  public get partition(): string {
+    return new AwsPartition(this.scope).toString();
+  }
+
+  public get region(): string {
+    return new AwsRegion(this.scope).toString();
+  }
+
+  public get stackId(): string {
+    return new AwsStackId(this.scope).toString();
+  }
+
+  public get stackName(): string {
+    return new AwsStackName(this.scope).toString();
   }
 }
 
-export class AwsDomainSuffix extends PseudoParameter {
-  constructor() {
-    super('AWS::DomainSuffix');
+class PseudoParameter extends CfnReference {
+  constructor(name: string, scope: Construct | undefined) {
+      super({ Ref: name }, name, scope);
   }
 }
 
-export class AwsURLSuffix extends PseudoParameter {
-  constructor() {
-    super('AWS::URLSuffix');
+class AwsAccountId extends PseudoParameter {
+  constructor(scope: Construct | undefined) {
+    super('AWS::AccountId', scope);
   }
 }
 
-export class AwsNotificationARNs extends PseudoParameter {
-  constructor() {
-    super('AWS::NotificationARNs');
+class AwsURLSuffix extends PseudoParameter {
+  constructor(scope: Construct | undefined) {
+    super('AWS::URLSuffix', scope);
   }
 }
 
-export class AwsNoValue extends PseudoParameter {
-  constructor() {
-    super('AWS::NoValue');
+class AwsNotificationARNs extends PseudoParameter {
+  constructor(scope: Construct | undefined) {
+    super('AWS::NotificationARNs', scope);
   }
 }
 
-export class AwsPartition extends PseudoParameter {
+export class AwsNoValue extends Token {
   constructor() {
-    super('AWS::Partition');
+    super({ Ref:  'AWS::NoValue' });
   }
 }
 
-export class AwsRegion extends PseudoParameter {
-  constructor() {
-    super('AWS::Region');
+class AwsPartition extends PseudoParameter {
+  constructor(scope: Construct | undefined) {
+    super('AWS::Partition', scope);
   }
 }
 
-export class AwsStackId extends PseudoParameter {
-  constructor() {
-    super('AWS::StackId');
+class AwsRegion extends PseudoParameter {
+  constructor(scope: Construct | undefined) {
+    super('AWS::Region', scope);
   }
 }
 
-export class AwsStackName extends PseudoParameter {
-  constructor() {
-    super('AWS::StackName');
+class AwsStackId extends PseudoParameter {
+  constructor(scope: Construct | undefined) {
+    super('AWS::StackId', scope);
+  }
+}
+
+class AwsStackName extends PseudoParameter {
+  constructor(scope: Construct | undefined) {
+    super('AWS::StackName', scope);
   }
 }

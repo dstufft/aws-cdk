@@ -17,7 +17,8 @@ export = {
     expect(stack).toMatch({
       "Resources": {
         "MyBucketF68F3FF0": {
-        "Type": "AWS::S3::Bucket"
+        "Type": "AWS::S3::Bucket",
+        "DeletionPolicy": "Retain",
         }
       }
     });
@@ -34,7 +35,8 @@ export = {
     expect(stack).toMatch({
       "Resources": {
         "MyBucketF68F3FF0": {
-        "Type": "AWS::S3::Bucket"
+        "Type": "AWS::S3::Bucket",
+        "DeletionPolicy": "Retain",
         }
       }
     });
@@ -62,7 +64,8 @@ export = {
             }
           ]
           }
-        }
+        },
+        "DeletionPolicy": "Retain",
         }
       }
     });
@@ -168,7 +171,8 @@ export = {
             }
           ]
           }
-        }
+        },
+        "DeletionPolicy": "Retain",
         }
       }
     });
@@ -189,7 +193,78 @@ export = {
             "VersioningConfiguration": {
               "Status": "Enabled"
             }
-          }
+          },
+        "DeletionPolicy": "Retain",
+        }
+      }
+    });
+    test.done();
+  },
+
+  'bucket with block public access set to BlockAll'(test: Test) {
+    const stack = new cdk.Stack();
+    new s3.Bucket(stack, 'MyBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BlockAll,
+    });
+
+    expect(stack).toMatch({
+      "Resources": {
+        "MyBucketF68F3FF0": {
+          "Type": "AWS::S3::Bucket",
+          "Properties": {
+            "PublicAccessBlockConfiguration": {
+              "BlockPublicAcls": true,
+              "BlockPublicPolicy": true,
+              "IgnorePublicAcls": true,
+              "RestrictPublicBuckets": true,
+            }
+          },
+        "DeletionPolicy": "Retain",
+        }
+      }
+    });
+    test.done();
+  },
+
+  'bucket with block public access set to BlockAcls'(test: Test) {
+    const stack = new cdk.Stack();
+    new s3.Bucket(stack, 'MyBucket', {
+      blockPublicAccess: s3.BlockPublicAccess.BlockAcls,
+    });
+
+    expect(stack).toMatch({
+      "Resources": {
+        "MyBucketF68F3FF0": {
+          "Type": "AWS::S3::Bucket",
+          "Properties": {
+            "PublicAccessBlockConfiguration": {
+              "BlockPublicAcls": true,
+              "IgnorePublicAcls": true,
+            }
+          },
+        "DeletionPolicy": "Retain",
+        }
+      }
+    });
+    test.done();
+  },
+
+  'bucket with custom block public access setting'(test: Test) {
+    const stack = new cdk.Stack();
+    new s3.Bucket(stack, 'MyBucket', {
+      blockPublicAccess: new s3.BlockPublicAccess({ restrictPublicBuckets: true })
+    });
+
+    expect(stack).toMatch({
+      "Resources": {
+        "MyBucketF68F3FF0": {
+          "Type": "AWS::S3::Bucket",
+          "Properties": {
+            "PublicAccessBlockConfiguration": {
+              "RestrictPublicBuckets": true,
+            }
+          },
+        "DeletionPolicy": "Retain",
         }
       }
     });
@@ -207,7 +282,8 @@ export = {
       expect(stack).toMatch({
         "Resources": {
           "MyBucketF68F3FF0": {
-          "Type": "AWS::S3::Bucket"
+          "Type": "AWS::S3::Bucket",
+        "DeletionPolicy": "Retain",
           },
           "MyBucketPolicyE7FBAC7B": {
           "Type": "AWS::S3::BucketPolicy",
@@ -225,7 +301,7 @@ export = {
             ],
             "Version": "2012-10-17"
             }
-          }
+          },
           }
         }
       });
@@ -240,7 +316,7 @@ export = {
 
       const x = new iam.PolicyStatement().addResource(bucket.bucketArn).addAction('s3:ListBucket');
 
-      test.deepEqual(cdk.resolve(x), {
+      test.deepEqual(bucket.node.resolve(x), {
         Action: 's3:ListBucket',
         Effect: 'Allow',
         Resource: { 'Fn::GetAtt': [ 'MyBucketF68F3FF0', 'Arn' ] }
@@ -256,7 +332,7 @@ export = {
 
       const p = new iam.PolicyStatement().addResource(bucket.arnForObjects('hello/world')).addAction('s3:GetObject');
 
-      test.deepEqual(cdk.resolve(p), {
+      test.deepEqual(bucket.node.resolve(p), {
         Action: 's3:GetObject',
         Effect: 'Allow',
         Resource: {
@@ -282,7 +358,7 @@ export = {
       const resource = bucket.arnForObjects('home/', team.groupName, '/', user.userName, '/*');
       const p = new iam.PolicyStatement().addResource(resource).addAction('s3:GetObject');
 
-      test.deepEqual(cdk.resolve(p), {
+      test.deepEqual(bucket.node.resolve(p), {
         Action: 's3:GetObject',
         Effect: 'Allow',
         Resource: {
@@ -325,10 +401,11 @@ export = {
       const stack = new cdk.Stack(undefined, 'MyStack');
       const bucket = new s3.Bucket(stack, 'MyBucket');
       const bucketRef = bucket.export();
-      test.deepEqual(cdk.resolve(bucketRef), {
+      test.deepEqual(bucket.node.resolve(bucketRef), {
         bucketArn: { 'Fn::ImportValue': 'MyStack:MyBucketBucketArnE260558C' },
         bucketName: { 'Fn::ImportValue': 'MyStack:MyBucketBucketName8A027014' },
-        bucketDomainName: { 'Fn::ImportValue': 'MyStack:MyBucketDomainNameF76B9A7A' }
+        bucketDomainName: { 'Fn::ImportValue': 'MyStack:MyBucketDomainNameF76B9A7A' },
+        bucketWebsiteUrl: { 'Fn::ImportValue': 'MyStack:MyBucketWebsiteURL9C222788' }
       });
       test.done();
     },
@@ -337,10 +414,11 @@ export = {
       const stack = new cdk.Stack(undefined, 'MyStack');
       const bucket = new s3.Bucket(stack, 'MyBucket', { encryption: s3.BucketEncryption.Kms });
       const bucketRef = bucket.export();
-      test.deepEqual(cdk.resolve(bucketRef), {
+      test.deepEqual(bucket.node.resolve(bucketRef), {
         bucketArn: { 'Fn::ImportValue': 'MyStack:MyBucketBucketArnE260558C' },
         bucketName: { 'Fn::ImportValue': 'MyStack:MyBucketBucketName8A027014' },
-        bucketDomainName: { 'Fn::ImportValue': 'MyStack:MyBucketDomainNameF76B9A7A' }
+        bucketDomainName: { 'Fn::ImportValue': 'MyStack:MyBucketDomainNameF76B9A7A' },
+        bucketWebsiteUrl: { 'Fn::ImportValue': 'MyStack:MyBucketWebsiteURL9C222788' }
       });
       test.done();
     },
@@ -357,14 +435,14 @@ export = {
       const p = new iam.PolicyStatement().addResource(bucket.bucketArn).addAction('s3:ListBucket');
 
       // it is possible to obtain a permission statement for a ref
-      test.deepEqual(cdk.resolve(p), {
+      test.deepEqual(bucket.node.resolve(p), {
         Action: 's3:ListBucket',
         Effect: 'Allow',
         Resource: 'arn:aws:s3:::my-bucket'
       });
 
       test.deepEqual(bucket.bucketArn, bucketArn);
-      test.deepEqual(cdk.resolve(bucket.bucketName), 'my-bucket');
+      test.deepEqual(bucket.node.resolve(bucket.bucketName), 'my-bucket');
 
       test.deepEqual(stack.toCloudFormation(), {}, 'the ref is not a real resource');
       test.done();
@@ -409,7 +487,7 @@ export = {
             "Ref": "MyUserDC45028B"
             }
           ]
-          }
+          },
         }
         }
       });
@@ -425,7 +503,8 @@ export = {
       expect(stack1).toMatch({
         "Resources": {
         "MyBucketF68F3FF0": {
-          "Type": "AWS::S3::Bucket"
+          "Type": "AWS::S3::Bucket",
+        "DeletionPolicy": "Retain",
         }
         },
         "Outputs": {
@@ -457,6 +536,17 @@ export = {
           },
           "Export": {
             "Name": "S1:MyBucketDomainNameF76B9A7A"
+          }
+        },
+        "MyBucketWebsiteURL9C222788": {
+          "Value": {
+            "Fn::GetAtt": [
+              "MyBucketF68F3FF0",
+              "WebsiteURL"
+            ]
+          },
+          "Export": {
+            "Name": "S1:MyBucketWebsiteURL9C222788"
           }
         }
         }
@@ -574,7 +664,8 @@ export = {
         }
       },
       "MyBucketF68F3FF0": {
-        "Type": "AWS::S3::Bucket"
+        "Type": "AWS::S3::Bucket",
+        "DeletionPolicy": "Retain"
       },
       }
     });
@@ -591,7 +682,8 @@ export = {
       expect(stack).toMatch({
         "Resources": {
           "MyBucketF68F3FF0": {
-          "Type": "AWS::S3::Bucket"
+          "Type": "AWS::S3::Bucket",
+        "DeletionPolicy": "Retain",
           },
           "MyUserDC45028B": {
           "Type": "AWS::IAM::User"
@@ -728,6 +820,7 @@ export = {
           },
           "MyBucketF68F3FF0": {
           "Type": "AWS::S3::Bucket",
+          "DeletionPolicy": "Retain",
           "Properties": {
             "BucketEncryption": {
             "ServerSideEncryptionConfiguration": [
@@ -854,7 +947,8 @@ export = {
     expect(stackA).toMatch({
       "Resources": {
       "MyBucketF68F3FF0": {
-        "Type": "AWS::S3::Bucket"
+        "Type": "AWS::S3::Bucket",
+          "DeletionPolicy": "Retain",
       }
       },
       "Outputs": {
@@ -887,6 +981,15 @@ export = {
         "Export": {
           "Name": "MyBucketDomainNameF76B9A7A"
         }
+      },
+      "MyBucketWebsiteURL9C222788": {
+        "Value": {
+          "Fn::GetAtt": [
+            "MyBucketF68F3FF0",
+            "WebsiteURL"
+          ]
+        },
+        "Export": {"Name": "MyBucketWebsiteURL9C222788"}
       }
       }
     });
@@ -953,7 +1056,8 @@ export = {
     expect(stack).toMatch({
       "Resources": {
       "MyBucketF68F3FF0": {
-        "Type": "AWS::S3::Bucket"
+        "Type": "AWS::S3::Bucket",
+        "DeletionPolicy": "Retain"
       }
       },
       "Outputs": {
@@ -977,9 +1081,6 @@ export = {
           ]
         ]
         },
-        "Export": {
-        "Name": "BucketURL"
-        }
       },
       "MyFileURL": {
         "Value": {
@@ -1001,9 +1102,6 @@ export = {
           "/my/file.txt"
           ]
         ]
-        },
-        "Export": {
-        "Name": "MyFileURL"
         }
       },
       "YourFileURL": {
@@ -1027,9 +1125,6 @@ export = {
           ]
         ]
         },
-        "Export": {
-        "Name": "YourFileURL"
-        }
       }
       }
     });
@@ -1140,6 +1235,19 @@ export = {
         }
       }));
       test.done();
+    },
+
+    'throws when blockPublicPolicy is set to true'(test: Test) {
+      // GIVEN
+      const stack = new cdk.Stack();
+      const bucket = new s3.Bucket(stack, 'MyBucket', {
+        blockPublicAccess: new s3.BlockPublicAccess({ blockPublicPolicy: true })
+      });
+
+      // THEN
+      test.throws(() => bucket.grantPublicAccess(), /blockPublicPolicy/);
+
+      test.done();
     }
   },
 
@@ -1177,6 +1285,14 @@ export = {
           ErrorDocument: "error.html"
         }
       }));
+      test.done();
+    },
+    'exports the WebsiteURL'(test: Test) {
+      const stack = new cdk.Stack();
+      const bucket = new s3.Bucket(stack, 'Website', {
+        websiteIndexDocument: 'index.html'
+      });
+      test.deepEqual(bucket.node.resolve(bucket.bucketWebsiteUrl), { 'Fn::GetAtt': [ 'Website32962D0B', 'WebsiteURL' ] });
       test.done();
     }
   }

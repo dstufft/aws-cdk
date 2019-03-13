@@ -34,7 +34,7 @@ example:
 ```ts
 import ec2 = require('@aws-cdk/aws-ec2');
 
-const vpc = new ec2.VpcNetwork(stack, 'TheVPC', {
+const vpc = new ec2.VpcNetwork(this, 'TheVPC', {
   cidr: '10.0.0.0/21',
   subnetConfiguration: [
     {
@@ -98,7 +98,7 @@ distributed for the application.
 ```ts
 import ec2 = require('@aws-cdk/aws-ec2');
 
-const vpc = new ec2.VpcNetwork(stack, 'TheVPC', {
+const vpc = new ec2.VpcNetwork(this, 'TheVPC', {
   cidr: '10.0.0.0/16',
   natGateways: 1,
   subnetConfiguration: [
@@ -144,7 +144,7 @@ traffic. This can be accomplished with a single parameter configuration:
 ```ts
 import ec2 = require('@aws-cdk/aws-ec2');
 
-const vpc = new ec2.VpcNetwork(stack, 'TheVPC', {
+const vpc = new ec2.VpcNetwork(this, 'TheVPC', {
   cidr: '10.0.0.0/16',
   natGateways: 1,
   natGatewayPlacement: {subnetName: 'Public'},
@@ -172,13 +172,15 @@ The `VpcNetwork` above will have the exact same subnet definitions as listed
 above. However, this time the VPC will have only 1 NAT Gateway and all
 Application subnets will route to the NAT Gateway.
 
-#### Sharing VPCs across stacks
+#### Sharing VPCs between stacks
 
 If you are creating multiple `Stack`s inside the same CDK application, you
 can reuse a VPC defined in one Stack in another by using `export()` and
 `import()`:
 
-[sharing VPCs between stacks](test/example.share-vpcs.lit.ts)
+[sharing VPCs between stacks](test/integ.share-vpcs.lit.ts)
+
+#### Importing an existing VPC
 
 If your VPC is created outside your CDK app, you can use `importFromContext()`:
 
@@ -301,3 +303,53 @@ selectable by instantiating one of these classes:
 > section of your `cdk.json`.
 >
 > We will add command-line options to make this step easier in the future.
+
+### VPN connections to a VPC
+
+Create your VPC with VPN connections by specifying the `vpnConnections` props (keys are construct `id`s):
+
+```ts
+const vpc = new ec2.VpcNetwork(stack, 'MyVpc', {
+  vpnConnections: {
+    dynamic: { // Dynamic routing (BGP)
+      ip: '1.2.3.4'
+    },
+    static: { // Static routing
+      ip: '4.5.6.7',
+      staticRoutes: [
+        '192.168.10.0/24',
+        '192.168.20.0/24'
+      ]
+    }
+  }
+});
+```
+
+To create a VPC that can accept VPN connections, set `vpnGateway` to `true`:
+
+```ts
+const vpc = new ec2.VpcNetwork(stack, 'MyVpc', {
+  vpnGateway: true
+});
+```
+
+VPN connections can then be added:
+```ts
+vpc.addVpnConnection('Dynamic', {
+  ip: '1.2.3.4'
+});
+```
+
+Routes will be propagated on the route tables associated with the private subnets.
+
+VPN connections expose [metrics (cloudwatch.Metric)](https://github.com/awslabs/aws-cdk/blob/master/packages/%40aws-cdk/aws-cloudwatch/README.md) across all tunnels in the account/region and per connection:
+```ts
+// Across all tunnels in the account/region
+const allDataOut = VpnConnection.metricAllTunnelDataOut();
+
+// For a specific vpn connection
+const vpnConnection = vpc.addVpnConnection('Dynamic', {
+  ip: '1.2.3.4'
+});
+const state = vpnConnection.metricTunnelState();
+```

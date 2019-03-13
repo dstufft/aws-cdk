@@ -1,5 +1,5 @@
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from '../elasticloadbalancingv2.generated';
+import { CfnListenerCertificate } from '../elasticloadbalancingv2.generated';
 import { IApplicationListener } from './application-listener';
 
 /**
@@ -22,20 +22,13 @@ export interface ApplicationListenerCertificateProps {
 /**
  * Add certificates to a listener
  */
-export class ApplicationListenerCertificate extends cdk.Construct implements cdk.IDependable {
-  /**
-   * The elements of this resou rce to add ordering dependencies on
-   */
-  public readonly dependencyElements: cdk.IDependable[] = [];
+export class ApplicationListenerCertificate extends cdk.Construct {
+  constructor(scope: cdk.Construct, id: string, props: ApplicationListenerCertificateProps) {
+    super(scope, id);
 
-  constructor(parent: cdk.Construct, id: string, props: ApplicationListenerCertificateProps) {
-    super(parent, id);
-
-    const resource = new cloudformation.ListenerCertificateResource(this, 'Resource', {
+    new CfnListenerCertificate(this, 'Resource', {
       listenerArn: props.listener.listenerArn,
       certificates: props.certificateArns.map(certificateArn => ({ certificateArn })),
     });
-
-    this.dependencyElements.push(resource);
   }
 }

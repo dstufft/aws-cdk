@@ -38,7 +38,7 @@ export interface FargateServiceProps extends BaseServiceProps {
    *
    * @default A new security group is created
    */
-  securityGroup?: ec2.SecurityGroupRef;
+  securityGroup?: ec2.ISecurityGroup;
 
   /**
    * Fargate platform version to run this service on
@@ -55,12 +55,15 @@ export interface FargateServiceProps extends BaseServiceProps {
  * Start a service on an ECS cluster
  */
 export class FargateService extends BaseService {
-  constructor(parent: cdk.Construct, name: string, props: FargateServiceProps) {
+  constructor(scope: cdk.Construct, id: string, props: FargateServiceProps) {
     if (!isFargateCompatible(props.taskDefinition.compatibility)) {
       throw new Error('Supplied TaskDefinition is not configured for compatibility with Fargate');
     }
 
-    super(parent, name, props, {
+    super(scope, id, {
+      ...props,
+      desiredCount: props.desiredCount !== undefined ? props.desiredCount : 1,
+    }, {
       cluster: props.cluster.clusterName,
       taskDefinition: props.taskDefinition.taskDefinitionArn,
       launchType: 'FARGATE',
@@ -87,7 +90,14 @@ export enum FargatePlatformVersion {
   Latest = 'LATEST',
 
   /**
-   * Version 1.2
+   * Version 1.3.0
+   *
+   * Supports secrets, task recycling.
+   */
+  Version1_3 = '1.3.0',
+
+  /**
+   * Version 1.2.0
    *
    * Supports private registries.
    */

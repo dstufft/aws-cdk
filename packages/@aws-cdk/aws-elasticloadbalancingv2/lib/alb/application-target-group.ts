@@ -1,10 +1,11 @@
 import cloudwatch = require('@aws-cdk/aws-cloudwatch');
 import ec2 = require('@aws-cdk/aws-ec2');
 import cdk = require('@aws-cdk/cdk');
-import { BaseTargetGroup, BaseTargetGroupProps, ITargetGroup, LoadBalancerTargetProps, TargetGroupRefProps } from '../shared/base-target-group';
+import { BaseTargetGroupProps, ITargetGroup, loadBalancerNameFromListenerArn, LoadBalancerTargetProps,
+         TargetGroupBase, TargetGroupImportProps } from '../shared/base-target-group';
 import { ApplicationProtocol } from '../shared/enums';
-import { BaseImportedTargetGroup } from '../shared/imported';
-import { determineProtocolAndPort, LazyDependable } from '../shared/util';
+import { ImportedTargetGroupBase } from '../shared/imported';
+import { determineProtocolAndPort } from '../shared/util';
 import { IApplicationListener } from './application-listener';
 import { HttpCodeTarget } from './application-load-balancer';
 
@@ -61,21 +62,21 @@ export interface ApplicationTargetGroupProps extends BaseTargetGroupProps {
 /**
  * Define an Application Target Group
  */
-export class ApplicationTargetGroup extends BaseTargetGroup {
+export class ApplicationTargetGroup extends TargetGroupBase implements IApplicationTargetGroup {
   /**
    * Import an existing target group
    */
-  public static import(parent: cdk.Construct, id: string, props: TargetGroupRefProps): IApplicationTargetGroup {
-    return new ImportedApplicationTargetGroup(parent, id, props);
+  public static import(scope: cdk.Construct, id: string, props: TargetGroupImportProps): IApplicationTargetGroup {
+    return new ImportedApplicationTargetGroup(scope, id, props);
   }
 
   private readonly connectableMembers: ConnectableMember[];
   private readonly listeners: IApplicationListener[];
 
-  constructor(parent: cdk.Construct, id: string, props: ApplicationTargetGroupProps) {
+  constructor(scope: cdk.Construct, id: string, props: ApplicationTargetGroupProps) {
     const [protocol, port] = determineProtocolAndPort(props.protocol, props.port);
 
-    super(parent, id, props, {
+    super(scope, id, props, {
       protocol,
       port,
     });
@@ -139,14 +140,24 @@ export class ApplicationTargetGroup extends BaseTargetGroup {
    *
    * Don't call this directly. It will be called by listeners.
    */
-  public registerListener(listener: IApplicationListener, dependable?: cdk.IDependable) {
+  public registerListener(listener: IApplicationListener, associatingConstruct?: cdk.IConstruct) {
     // Notify this listener of all connectables that we know about.
     // Then remember for new connectables that might get added later.
     for (const member of this.connectableMembers) {
       listener.registerConnectable(member.connectable, member.portRange);
     }
     this.listeners.push(listener);
-    this.loadBalancerAssociationDependencies.push(dependable || listener);
+    this.loadBalancerAttachedDependencies.add(associatingConstruct || listener);
+  }
+
+  /**
+   * Full name of first load balancer
+   */
+  public get firstLoadBalancerFullName(): string {
+    if (this.listeners.length === 0) {
+      throw new Error('The TargetGroup needs to be attached to a LoadBalancer before you can call this method');
+    }
+    return loadBalancerNameFromListenerArn(this.listeners[0].listenerArn);
   }
 
   /**
@@ -313,19 +324,15 @@ export interface IApplicationTargetGroup extends ITargetGroup {
    *
    * Don't call this directly. It will be called by listeners.
    */
-  registerListener(listener: IApplicationListener, dependable?: cdk.IDependable): void;
+  registerListener(listener: IApplicationListener, associatingConstruct?: cdk.IConstruct): void;
 }
 
 /**
  * An imported application target group
  */
-class ImportedApplicationTargetGroup extends BaseImportedTargetGroup implements IApplicationTargetGroup {
-  public registerListener(_listener: IApplicationListener, _dependable?: cdk.IDependable) {
+class ImportedApplicationTargetGroup extends ImportedTargetGroupBase implements IApplicationTargetGroup {
+  public registerListener(_listener: IApplicationListener, _associatingConstruct?: cdk.IConstruct) {
     // Nothing to do, we know nothing of our members
-  }
-
-  public loadBalancerDependency(): cdk.IDependable {
-    return new LazyDependable([]);
   }
 }
 

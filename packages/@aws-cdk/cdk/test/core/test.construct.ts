@@ -1,6 +1,6 @@
 import cxapi = require('@aws-cdk/cx-api');
 import { Test } from 'nodeunit';
-import { Construct, Root } from '../../lib';
+import { ArnComponents, Construct, ConstructOrder, Root, Stack, Token } from '../../lib';
 
 // tslint:disable:variable-name
 // tslint:disable:max-line-length
@@ -8,9 +8,9 @@ import { Construct, Root } from '../../lib';
 export = {
   'the "Root" construct is a special construct which can be used as the root of the tree'(test: Test) {
     const root = new Root();
-    test.equal(root.id, '', 'if not specified, name of a root construct is an empty string');
-    test.ok(!root.parent, 'no parent');
-    test.equal(root.children.length, 0, 'a construct is created without children'); // no children
+    test.equal(root.node.id, '', 'if not specified, name of a root construct is an empty string');
+    test.ok(!root.node.scope, 'no parent');
+    test.equal(root.node.children.length, 0, 'a construct is created without children'); // no children
     test.done();
   },
 
@@ -23,12 +23,12 @@ export = {
   'construct.name returns the name of the construct'(test: Test) {
     const t = createTree();
 
-    test.equal(t.child1.id, 'Child1');
-    test.equal(t.child2.id, 'Child2');
-    test.equal(t.child1_1.id, 'Child11');
-    test.equal(t.child1_2.id, 'Child12');
-    test.equal(t.child1_1_1.id, 'Child111');
-    test.equal(t.child2_1.id, 'Child21');
+    test.equal(t.child1.node.id, 'Child1');
+    test.equal(t.child2.node.id, 'Child2');
+    test.equal(t.child1_1.node.id, 'Child11');
+    test.equal(t.child1_2.node.id, 'Child12');
+    test.equal(t.child1_1_1.node.id, 'Child111');
+    test.equal(t.child2_1.node.id, 'Child21');
 
     test.done();
   },
@@ -47,8 +47,29 @@ export = {
     new Construct(root, 'in-Valid' );
     new Construct(root, 'in\\Valid' );
     new Construct(root, 'in.Valid' );
+    test.done();
+  },
 
-    test.throws(() => new Construct(root, 'in/Valid' ), Error, 'backslashes are not allowed');
+  'if construct id contains path seperators, they will be replaced by double-dash'(test: Test) {
+    const root = new Root();
+    const c = new Construct(root, 'Boom/Boom/Bam');
+    test.deepEqual(c.node.id, 'Boom--Boom--Bam');
+    test.done();
+  },
+
+  'if "undefined" is forcefully used as an "id", it will be treated as an empty string'(test: Test) {
+    const c = new Construct(undefined as any, undefined as any);
+    test.deepEqual(c.node.id, '');
+    test.done();
+  },
+
+  "dont allow unresolved tokens to be used in construct IDs"(test: Test) {
+    // GIVEN
+    const root = new Root();
+    const token = new Token(() => 'lazy');
+
+    // WHEN + THEN
+    test.throws(() => new Construct(root, `MyID: ${token}`), /Cannot use tokens in construct ID: MyID: \${Token/);
     test.done();
   },
 
@@ -60,16 +81,61 @@ export = {
     const c1 = new Construct(child2, 'My construct');
     const c2 = new Construct(child1, 'My construct');
 
-    test.deepEqual(c1.path, 'This is the first child/Second level/My construct');
-    test.deepEqual(c2.path, 'This is the first child/My construct');
-    test.deepEqual(c1.uniqueId, 'ThisisthefirstchildSecondlevelMyconstruct202131E0');
-    test.deepEqual(c2.uniqueId, 'ThisisthefirstchildMyconstruct8C288DF9');
+    test.deepEqual(c1.node.path, 'This is the first child/Second level/My construct');
+    test.deepEqual(c2.node.path, 'This is the first child/My construct');
+    test.deepEqual(c1.node.uniqueId, 'ThisisthefirstchildSecondlevelMyconstruct202131E0');
+    test.deepEqual(c2.node.uniqueId, 'ThisisthefirstchildMyconstruct8C288DF9');
     test.done();
   },
 
   'cannot calculate uniqueId if the construct path is ["Default"]'(test: Test) {
     const root = new Root();
-    test.throws(() => new Construct(root, 'Default'), /Unable to calculate a unique id for an empty set of components/);
+    const c = new Construct(root, 'Default');
+    test.throws(() => c.node.uniqueId, /Unable to calculate a unique id for an empty set of components/);
+    test.done();
+  },
+
+  'construct.node.stack returns the correct stack'(test: Test) {
+    const stack = new Stack();
+    test.same(stack.node.stack, stack);
+    const parent = new Construct(stack, 'Parent');
+    const construct = new Construct(parent, 'Construct');
+    test.same(construct.node.stack, stack);
+    test.done();
+  },
+
+  'construct.node.stack throws when there is no parent Stack'(test: Test) {
+    const root = new Root();
+    const construct = new Construct(root, 'Construct');
+    test.throws(() => construct.node.stack, /No stack could be identified for the construct at path/);
+    test.done();
+  },
+
+  'construct.node.stack.formatArn forwards to the Stack'(test: Test) {
+    const stack = new Stack();
+    const components: ArnComponents = { service: 'test', resource: 'test' };
+    const dummyArn = 'arn:::dummy';
+    stack.formatArn = (args) => {
+      test.same(args, components);
+      return dummyArn;
+    };
+
+    const construct = new Construct(stack, 'Construct');
+    test.same(construct.node.stack.formatArn(components), dummyArn);
+    test.done();
+  },
+
+  'construct.node.stack.parseArn forwards to the Stack'(test: Test) {
+    const stack = new Stack();
+    const components: ArnComponents = { service: 'test', resource: 'test' };
+    const dummyArn = 'arn:::dummy';
+    stack.parseArn = (arn) => {
+      test.same(arn, dummyArn);
+      return components;
+    };
+
+    const construct = new Construct(stack, 'Construct');
+    test.same(construct.node.stack.parseArn(dummyArn), components);
     test.done();
   },
 
@@ -77,25 +143,25 @@ export = {
     const root = new Root();
     const child = new Construct(root, 'Child1');
     new Construct(root, 'Child2');
-    test.equal(child.children.length, 0, 'no children');
-    test.equal(root.children.length, 2, 'two children are expected');
+    test.equal(child.node.children.length, 0, 'no children');
+    test.equal(root.node.children.length, 2, 'two children are expected');
     test.done();
   },
 
   'construct.findChild(name) can be used to retrieve a child from a parent'(test: Test) {
     const root = new Root();
     const child = new Construct(root, 'Contruct');
-    test.strictEqual(root.tryFindChild(child.id), child, 'findChild(name) can be used to retrieve the child from a parent');
-    test.ok(!root.tryFindChild('NotFound'), 'findChild(name) returns undefined if the child is not found');
+    test.strictEqual(root.node.tryFindChild(child.node.id), child, 'findChild(name) can be used to retrieve the child from a parent');
+    test.ok(!root.node.tryFindChild('NotFound'), 'findChild(name) returns undefined if the child is not found');
     test.done();
   },
 
   'construct.getChild(name) can be used to retrieve a child from a parent'(test: Test) {
     const root = new Root();
     const child = new Construct(root, 'Contruct');
-    test.strictEqual(root.findChild(child.id), child, 'getChild(name) can be used to retrieve the child from a parent');
+    test.strictEqual(root.node.findChild(child.node.id), child, 'getChild(name) can be used to retrieve the child from a parent');
     test.throws(() => {
-      root.findChild('NotFound');
+      root.node.findChild('NotFound');
     }, '', 'getChild(name) returns undefined if the child is not found');
     test.done();
   },
@@ -106,7 +172,7 @@ export = {
     test.equal(t.root.toString(), 'Root');
     test.equal(t.child1_1_1.toString(), 'Construct [Child1/Child11/Child111]');
     test.equal(t.child2.toString(), 'Construct [Child2]');
-    test.equal(t.root.toTreeString(), 'Root\n  Construct [Child1]\n    Construct [Child11]\n      Construct [Child111]\n    Construct [Child12]\n  Construct [Child2]\n    Construct [Child21]\n');
+    test.equal(t.root.node.toTreeString(), 'Root\n  Construct [Child1]\n    Construct [Child11]\n      Construct [Child111]\n    Construct [Child12]\n  Construct [Child2]\n    Construct [Child21]\n');
     test.done();
   },
 
@@ -117,41 +183,41 @@ export = {
     };
 
     const t = createTree(context);
-    test.equal(t.root.getContext('ctx1'), 12);
-    test.equal(t.child1_1_1.getContext('ctx2'), 'hello');
+    test.equal(t.root.node.getContext('ctx1'), 12);
+    test.equal(t.child1_1_1.node.getContext('ctx2'), 'hello');
     test.done();
   },
 
   'construct.setContext(k,v) sets context at some level and construct.getContext(key) will return the lowermost value defined in the stack'(test: Test) {
     const root = new Root();
-    root.setContext('c1', 'root');
-    root.setContext('c2', 'root');
+    root.node.setContext('c1', 'root');
+    root.node.setContext('c2', 'root');
 
     const child1 = new Construct(root, 'child1');
-    child1.setContext('c2', 'child1');
-    child1.setContext('c3', 'child1');
+    child1.node.setContext('c2', 'child1');
+    child1.node.setContext('c3', 'child1');
 
     const child2 = new Construct(root, 'child2');
     const child3 = new Construct(child1, 'child1child1');
-    child3.setContext('c1', 'child3');
-    child3.setContext('c4', 'child3');
+    child3.node.setContext('c1', 'child3');
+    child3.node.setContext('c4', 'child3');
 
-    test.equal(root.getContext('c1'), 'root');
-    test.equal(root.getContext('c2'), 'root');
-    test.equal(root.getContext('c3'), undefined);
+    test.equal(root.node.getContext('c1'), 'root');
+    test.equal(root.node.getContext('c2'), 'root');
+    test.equal(root.node.getContext('c3'), undefined);
 
-    test.equal(child1.getContext('c1'), 'root');
-    test.equal(child1.getContext('c2'), 'child1');
-    test.equal(child1.getContext('c3'), 'child1');
+    test.equal(child1.node.getContext('c1'), 'root');
+    test.equal(child1.node.getContext('c2'), 'child1');
+    test.equal(child1.node.getContext('c3'), 'child1');
 
-    test.equal(child2.getContext('c1'), 'root');
-    test.equal(child2.getContext('c2'), 'root');
-    test.equal(child2.getContext('c3'), undefined);
+    test.equal(child2.node.getContext('c1'), 'root');
+    test.equal(child2.node.getContext('c2'), 'root');
+    test.equal(child2.node.getContext('c3'), undefined);
 
-    test.equal(child3.getContext('c1'), 'child3');
-    test.equal(child3.getContext('c2'), 'child1');
-    test.equal(child3.getContext('c3'), 'child1');
-    test.equal(child3.getContext('c4'), 'child3');
+    test.equal(child3.node.getContext('c1'), 'child3');
+    test.equal(child3.node.getContext('c2'), 'child1');
+    test.equal(child3.node.getContext('c3'), 'child1');
+    test.equal(child3.node.getContext('c4'), 'child3');
 
     test.done();
   },
@@ -159,22 +225,22 @@ export = {
   'construct.setContext(key, value) can only be called before adding any children'(test: Test) {
     const root = new Root();
     new Construct(root, 'child1');
-    test.throws(() => root.setContext('k', 'v'));
+    test.throws(() => root.node.setContext('k', 'v'));
     test.done();
   },
 
   'construct.pathParts returns an array of strings of all names from root to node'(test: Test) {
     const tree = createTree();
-    test.deepEqual(tree.root.path, '');
-    test.deepEqual(tree.child1_1_1.path, 'Child1/Child11/Child111');
-    test.deepEqual(tree.child2.path, 'Child2');
+    test.deepEqual(tree.root.node.path, '');
+    test.deepEqual(tree.child1_1_1.node.path, 'Child1/Child11/Child111');
+    test.deepEqual(tree.child2.node.path, 'Child2');
     test.done();
   },
 
   'if a root construct has a name, it should be included in the path'(test: Test) {
     const tree = createTree({});
-    test.deepEqual(tree.root.path, '');
-    test.deepEqual(tree.child1_1_1.path, 'Child1/Child11/Child111');
+    test.deepEqual(tree.root.node.path, '');
+    test.deepEqual(tree.child1_1_1.node.path, 'Child1/Child11/Child111');
     test.done();
   },
 
@@ -187,7 +253,16 @@ export = {
     // THEN: They have different paths
     test.throws(() => {
       new Construct(root, 'SameName');
-    });
+    }, /There is already a Construct with name 'SameName' in Root/);
+
+    // WHEN
+    const c0 = new Construct(root, 'c0');
+    new Construct(c0, 'SameName');
+
+    // THEN: They have different paths
+    test.throws(() => {
+      new Construct(c0, 'SameName');
+    }, /There is already a Construct with name 'SameName' in Construct \[c0\]/);
 
     test.done();
   },
@@ -195,30 +270,30 @@ export = {
   'addMetadata(type, data) can be used to attach metadata to constructs FIND_ME'(test: Test) {
     const root = new Root();
     const con = new Construct(root, 'MyConstruct');
-    test.deepEqual(con.metadata, [], 'starts empty');
+    test.deepEqual(con.node.metadata, [], 'starts empty');
 
-    con.addMetadata('key', 'value');
-    con.addMetadata('number', 103);
-    con.addMetadata('array', [ 123, 456 ]);
+    con.node.addMetadata('key', 'value');
+    con.node.addMetadata('number', 103);
+    con.node.addMetadata('array', [ 123, 456 ]);
 
-    test.deepEqual(con.metadata[0].type, 'key');
-    test.deepEqual(con.metadata[0].data, 'value');
-    test.deepEqual(con.metadata[1].data, 103);
-    test.deepEqual(con.metadata[2].data, [ 123, 456 ]);
-    test.ok(con.metadata[0].trace[0].indexOf('FIND_ME') !== -1, 'First stack line should include this function\s name');
+    test.deepEqual(con.node.metadata[0].type, 'key');
+    test.deepEqual(con.node.metadata[0].data, 'value');
+    test.deepEqual(con.node.metadata[1].data, 103);
+    test.deepEqual(con.node.metadata[2].data, [ 123, 456 ]);
+    test.ok(con.node.metadata[0].trace[0].indexOf('FIND_ME') !== -1, 'First stack line should include this function\s name');
     test.done();
   },
 
   'addMetadata(type, undefined/null) is ignored'(test: Test) {
     const root = new Root();
     const con = new Construct(root, 'Foo');
-    con.addMetadata('Null', null);
-    con.addMetadata('Undefined', undefined);
-    con.addMetadata('True', true);
-    con.addMetadata('False', false);
-    con.addMetadata('Empty', '');
+    con.node.addMetadata('Null', null);
+    con.node.addMetadata('Undefined', undefined);
+    con.node.addMetadata('True', true);
+    con.node.addMetadata('False', false);
+    con.node.addMetadata('Empty', '');
 
-    const exists = (key: string) => con.metadata.find(x => x.type === key);
+    const exists = (key: string) => con.node.metadata.find(x => x.type === key);
 
     test.ok(!exists('Null'));
     test.ok(!exists('Undefined'));
@@ -231,30 +306,30 @@ export = {
   'addWarning(message) can be used to add a "WARNING" message entry to the construct'(test: Test) {
     const root = new Root();
     const con = new Construct(root, 'MyConstruct');
-    con.addWarning('This construct is deprecated, use the other one instead');
-    test.deepEqual(con.metadata[0].type, cxapi.WARNING_METADATA_KEY);
-    test.deepEqual(con.metadata[0].data, 'This construct is deprecated, use the other one instead');
-    test.ok(con.metadata[0].trace.length > 0);
+    con.node.addWarning('This construct is deprecated, use the other one instead');
+    test.deepEqual(con.node.metadata[0].type, cxapi.WARNING_METADATA_KEY);
+    test.deepEqual(con.node.metadata[0].data, 'This construct is deprecated, use the other one instead');
+    test.ok(con.node.metadata[0].trace.length > 0);
     test.done();
   },
 
   'addError(message) can be used to add a "ERROR" message entry to the construct'(test: Test) {
     const root = new Root();
     const con = new Construct(root, 'MyConstruct');
-    con.addError('Stop!');
-    test.deepEqual(con.metadata[0].type, cxapi.ERROR_METADATA_KEY);
-    test.deepEqual(con.metadata[0].data, 'Stop!');
-    test.ok(con.metadata[0].trace.length > 0);
+    con.node.addError('Stop!');
+    test.deepEqual(con.node.metadata[0].type, cxapi.ERROR_METADATA_KEY);
+    test.deepEqual(con.node.metadata[0].data, 'Stop!');
+    test.ok(con.node.metadata[0].trace.length > 0);
     test.done();
   },
 
   'addInfo(message) can be used to add an "INFO" message entry to the construct'(test: Test) {
     const root = new Root();
     const con = new Construct(root, 'MyConstruct');
-    con.addInfo('Hey there, how do you do?');
-    test.deepEqual(con.metadata[0].type, cxapi.INFO_METADATA_KEY);
-    test.deepEqual(con.metadata[0].data, 'Hey there, how do you do?');
-    test.ok(con.metadata[0].trace.length > 0);
+    con.node.addInfo('Hey there, how do you do?');
+    test.deepEqual(con.node.metadata[0].type, cxapi.INFO_METADATA_KEY);
+    test.deepEqual(con.node.metadata[0].data, 'Hey there, how do you do?');
+    test.ok(con.node.metadata[0].trace.length > 0);
     test.done();
   },
 
@@ -264,7 +339,7 @@ export = {
     new MyBeautifulConstruct(root, 'mbc2');
     new MyBeautifulConstruct(root, 'mbc3');
     new MyBeautifulConstruct(root, 'mbc4');
-    test.equal(root.children.length, 4);
+    test.equal(root.node.children.length, 4);
     test.done();
   },
 
@@ -281,43 +356,34 @@ export = {
     test.done();
   },
 
-  'Construct name validation can be overridden'(test: Test) {
-    const root = new Root();
-
-    test.throws(() => new IAmSpartacusConstruct(root, "Caesar"));
-    new IAmSpartacusConstruct(root, "Spartacus");
-
-    test.done();
-  },
-
   // tslint:disable-next-line:max-line-length
   'construct.validate() can be implemented to perform validation, construct.validateTree() will return all errors from the subtree (DFS)'(test: Test) {
 
     class MyConstruct extends Construct {
-      public validate() {
+      protected validate() {
         return [ 'my-error1', 'my-error2' ];
       }
     }
 
     class YourConstruct extends Construct {
-      public validate() {
+      protected validate() {
         return [ 'your-error1' ];
       }
     }
 
     class TheirConstruct extends Construct {
-      constructor(parent: Construct, name: string) {
-        super(parent, name);
+      constructor(scope: Construct, id: string) {
+        super(scope, id);
 
         new YourConstruct(this, 'YourConstruct');
       }
 
-      public validate() {
+      protected validate() {
         return [ 'their-error' ];
       }
     }
 
-    class Stack extends Root {
+    class TestStack extends Root {
       constructor() {
         super();
 
@@ -325,14 +391,14 @@ export = {
         new TheirConstruct(this, 'TheirConstruct');
       }
 
-      public validate() {
+      protected validate() {
         return  [ 'stack-error' ];
       }
     }
 
-    const stack = new Stack();
+    const stack = new TestStack();
 
-    const errors = (stack.validateTree()).map(v => ({ path: v.source.path, message: v.message }));
+    const errors = (stack.node.validateTree()).map(v => ({ path: v.source.node.path, message: v.message }));
 
     // validate DFS
     test.deepEqual(errors, [
@@ -350,11 +416,11 @@ export = {
 
     class LockableConstruct extends Construct {
       public lockMe() {
-        this.lock();
+        this.node.lock();
       }
 
       public unlockMe() {
-        this.unlock();
+        this.node.unlock();
       }
     }
 
@@ -381,13 +447,28 @@ export = {
     new Construct(c1b, 'c1bZ');
 
     test.done();
+  },
+
+  'findAll returns a list of all children in either DFS or BFS'(test: Test) {
+    // GIVEN
+    const c1 = new Construct(undefined as any, '1');
+    const c2 = new Construct(c1, '2');
+    new Construct(c1, '3');
+    new Construct(c2, '4');
+    new Construct(c2, '5');
+
+    // THEN
+    test.deepEqual(c1.node.findAll().map(x => x.node.id), c1.node.findAll(ConstructOrder.PreOrder).map(x => x.node.id)); // default is PreOrder
+    test.deepEqual(c1.node.findAll(ConstructOrder.PreOrder).map(x => x.node.id), [ '1', '2', '4', '5', '3' ]);
+    test.deepEqual(c1.node.findAll(ConstructOrder.PostOrder).map(x => x.node.id), [ '4', '5', '2', '3', '1' ]);
+    test.done();
   }
 };
 
 function createTree(context?: any) {
   const root = new Root();
   if (context) {
-    Object.keys(context).forEach(key => root.setContext(key, context[key]));
+    Object.keys(context).forEach(key => root.node.setContext(key, context[key]));
   }
 
   const child1 = new Construct(root, 'Child1');
@@ -403,8 +484,8 @@ function createTree(context?: any) {
 }
 
 class MyBeautifulConstruct extends Construct {
-  constructor(parent: Construct, name: string) {
-    super(parent, name);
+  constructor(scope: Construct, id: string) {
+    super(scope, id);
   }
 }
 
@@ -418,21 +499,10 @@ class ConstructWithRequired extends Construct {
   public readonly requiredProp: string;
   public readonly anotherRequiredProp: boolean;
 
-  constructor(parent: Construct, name: string, props: ConstructWithRequiredProps) {
-    super(parent, name);
+  constructor(scope: Construct, id: string, props: ConstructWithRequiredProps) {
+    super(scope, id);
 
-    this.requiredProp = this.required(props, 'requiredProp');
-    this.anotherRequiredProp = this.required(props, 'anotherRequiredProp');
-  }
-}
-
-/**
- * Construct that *must* be named "Spartacus"
- */
-class IAmSpartacusConstruct extends Construct {
-  protected _validateId(name: string) {
-    if (name !== "Spartacus") {
-      throw new Error("Construct name must be 'Spartacus'");
-    }
+    this.requiredProp = this.node.required(props, 'requiredProp');
+    this.anotherRequiredProp = this.node.required(props, 'anotherRequiredProp');
   }
 }

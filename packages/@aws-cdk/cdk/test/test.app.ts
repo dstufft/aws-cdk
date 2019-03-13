@@ -1,31 +1,17 @@
 import cxapi = require('@aws-cdk/cx-api');
-import fs = require('fs');
 import { Test } from 'nodeunit';
-import os = require('os');
-import path = require('path');
 import { Construct, Resource, Stack, StackProps } from '../lib';
 import { App } from '../lib/app';
 
-function withApp(context: { [key: string]: any } | undefined, block: (app: App) => void) {
-  const outdir = fs.mkdtempSync(path.join(os.tmpdir(), 'cdk-app-test'));
-  process.env[cxapi.OUTDIR_ENV] = outdir;
+function withApp(context: { [key: string]: any } | undefined, block: (app: App) => void): cxapi.SynthesizeResponse {
+  const app = new App(context);
 
-  if (context) {
-    process.env[cxapi.CONTEXT_ENV] = JSON.stringify(context);
-  } else {
-    delete process.env[cxapi.CONTEXT_ENV];
-  }
-
-  const app = new App();
   block(app);
 
-  app.run();
+  const session = app.run();
 
-  const outfile = path.join(outdir, cxapi.OUTFILE_NAME);
-  const response = JSON.parse(fs.readFileSync(outfile).toString());
-  fs.unlinkSync(outfile);
-  fs.rmdirSync(outdir);
-  return response;
+  // return the legacy manifest
+  return session.store.readJson(cxapi.OUTFILE_NAME);
 }
 
 function synth(context?: { [key: string]: any }): cxapi.SynthesizeResponse {
@@ -39,11 +25,11 @@ function synth(context?: { [key: string]: any }): cxapi.SynthesizeResponse {
     const c1 = new MyConstruct(stack2, 's1c2');
 
     // add some metadata
-    stack1.addMetadata('meta', 111);
-    r2.addWarning('warning1');
-    r2.addWarning('warning2');
-    c1.addMetadata('meta', { key: 'value' });
-    app.addMetadata('applevel', 123); // apps can also have metadata
+    stack1.node.addMetadata('meta', 111);
+    r2.node.addWarning('warning1');
+    r2.node.addWarning('warning2');
+    c1.node.addMetadata('meta', { key: 'value' });
+    app.node.addMetadata('applevel', 123); // apps can also have metadata
   });
 }
 
@@ -68,9 +54,10 @@ export = {
     // clean up metadata so assertion will be sane
     response.stacks.forEach(s => delete s.metadata);
     delete response.runtime;
+    delete response.artifacts;
 
     test.deepEqual(response, {
-      version: '0.14.0',
+      version: '0.19.0',
       stacks:
       [ { name: 'stack1',
           environment:
@@ -99,13 +86,7 @@ export = {
     const stack = new Stack(prog, 'MyStack');
     new Resource(stack, 'MyResource', { type: 'MyResourceType' });
 
-    let throws;
-    try {
-      prog.synthesizeStacks(['foo']);
-    } catch (e) {
-      throws = e.message;
-    }
-    test.ok(throws.indexOf('Cannot find stack foo') !== -1);
+    test.throws(() => prog.synthesizeStacks(['foo']), /foo/);
 
     test.deepEqual(prog.synthesizeStack('MyStack').template,
       { Resources: { MyResource: { Type: 'MyResourceType' } } });
@@ -147,8 +128,8 @@ export = {
       key2: 'val2'
     });
     const prog = new App();
-    test.deepEqual(prog.getContext('key1'), 'val1');
-    test.deepEqual(prog.getContext('key2'), 'val2');
+    test.deepEqual(prog.node.getContext('key1'), 'val1');
+    test.deepEqual(prog.node.getContext('key2'), 'val2');
     test.done();
   },
 
@@ -179,23 +160,23 @@ export = {
 
   'setContext(k,v) can be used to set context programmatically'(test: Test) {
     const prog = new App();
-    prog.setContext('foo', 'bar');
-    test.deepEqual(prog.getContext('foo'), 'bar');
+    prog.node.setContext('foo', 'bar');
+    test.deepEqual(prog.node.getContext('foo'), 'bar');
     test.done();
   },
 
   'setContext(k,v) cannot be called after stacks have been added because stacks may use the context'(test: Test) {
     const prog = new App();
     new Stack(prog, 's1');
-    test.throws(() => prog.setContext('foo', 'bar'));
+    test.throws(() => prog.node.setContext('foo', 'bar'));
     test.done();
   },
 
   'app.synthesizeStack(stack) performs validation first (app.validateAll()) and if there are errors, it returns the errors'(test: Test) {
 
     class Child extends Construct {
-      public validate() {
-        return [ `Error from ${this.id}` ];
+      protected validate() {
+        return [ `Error from ${this.node.id}` ];
       }
     }
 
@@ -211,15 +192,15 @@ export = {
 
     test.throws(() => {
       app.synthesizeStacks(['Parent']);
-    }, /Stack validation failed with the following errors/);
+    }, /Validation failed with the following errors/);
 
     test.done();
   },
 
   'app.synthesizeStack(stack) will return a list of missing contextual information'(test: Test) {
     class MyStack extends Stack {
-      constructor(parent: App, name: string, props?: StackProps) {
-        super(parent, name, props);
+      constructor(scope: App, id: string, props?: StackProps) {
+        super(scope, id, props);
 
         this.reportMissingContext('missing-context-key', {
           provider: 'fake',
@@ -266,14 +247,75 @@ export = {
 
     test.done();
   },
+
+  'runtime library versions disabled'(test: Test) {
+    const context: any = {};
+    context[cxapi.DISABLE_VERSION_REPORTING] = true;
+
+    const response = withApp(context, app => {
+      const stack = new Stack(app, 'stack1');
+      new Resource(stack, 'MyResource', { type: 'Resource::Type' });
+    });
+
+    test.equals(response.runtime, undefined);
+    test.done();
+  },
+
+  'runtime library versions'(test: Test) {
+    const response = withApp({}, app => {
+      const stack = new Stack(app, 'stack1');
+      new Resource(stack, 'MyResource', { type: 'Resource::Type' });
+    });
+
+    const libs = (response.runtime && response.runtime.libraries) || { };
+
+    const version = require('../package.json').version;
+    test.deepEqual(libs['@aws-cdk/cdk'], version);
+    test.deepEqual(libs['@aws-cdk/cx-api'], version);
+    test.deepEqual(libs['jsii-runtime'], `node.js/${process.version}`);
+    test.done();
+  },
+
+  'jsii-runtime version loaded from JSII_AGENT'(test: Test) {
+    process.env.JSII_AGENT = 'Java/1.2.3.4';
+
+    const response = withApp({}, app => {
+      const stack = new Stack(app, 'stack1');
+      new Resource(stack, 'MyResource', { type: 'Resource::Type' });
+    });
+
+    const libs = (response.runtime && response.runtime.libraries) || { };
+    test.deepEqual(libs['jsii-runtime'], `Java/1.2.3.4`);
+
+    delete process.env.JSII_AGENT;
+    test.done();
+  },
+
+  'version reporting includes only @aws-cdk, aws-cdk and jsii libraries'(test: Test) {
+    const response = withApp({}, app => {
+      const stack = new Stack(app, 'stack1');
+      new Resource(stack, 'MyResource', { type: 'Resource::Type' });
+    });
+
+    const libs = (response.runtime && response.runtime.libraries) || { };
+
+    const version = require('../package.json').version;
+    test.deepEqual(libs, {
+      '@aws-cdk/cdk': version,
+      '@aws-cdk/cx-api': version,
+      'jsii-runtime': `node.js/${process.version}`
+    });
+
+    test.done();
+  },
 };
 
 class MyConstruct extends Construct {
-  constructor(parent: Construct, name: string) {
-    super(parent, name);
+  constructor(scope: Construct, id: string) {
+    super(scope, id);
 
     new Resource(this, 'r1', { type: 'ResourceType1' });
-    new Resource(this, 'r2', { type: 'ResourceType2', properties: { FromContext: this.getContext('ctx1') } });
+    new Resource(this, 'r2', { type: 'ResourceType2', properties: { FromContext: this.node.getContext('ctx1') } });
   }
 }
 

@@ -14,23 +14,34 @@ const stack = new cdk.Stack(app, 'aws-cdk-codepipeline-cloudformation-cross-regi
 
 const bucket = new s3.Bucket(stack, 'MyBucket', {
   versioned: true,
+  removalPolicy: cdk.RemovalPolicy.Destroy,
 });
 
-const pipeline = new codepipeline.Pipeline(stack, 'MyPipeline', {
-  artifactBucket: bucket,
-});
-
-const sourceStage = pipeline.addStage('Source');
-const sourceAction = bucket.addToPipeline(sourceStage, 'S3', {
+const sourceAction = bucket.toCodePipelineSourceAction({
+  actionName: 'S3',
   bucketKey: 'some/path',
 });
 
-const cfnStage = pipeline.addStage('CFN');
-new cloudformation.PipelineCreateUpdateStackAction(stack, 'CFN_Deploy', {
-  stage: cfnStage,
-  stackName: 'aws-cdk-codepipeline-cross-region-deploy-stack',
-  templatePath: sourceAction.outputArtifact.atPath('template.yml'),
-  region,
+new codepipeline.Pipeline(stack, 'MyPipeline', {
+  artifactBucket: bucket,
+  stages: [
+    {
+      name: 'Source',
+      actions: [sourceAction],
+    },
+    {
+      name: 'CFN',
+      actions: [
+        new cloudformation.PipelineCreateUpdateStackAction({
+          actionName: 'CFN_Deploy',
+          stackName: 'aws-cdk-codepipeline-cross-region-deploy-stack',
+          templatePath: sourceAction.outputArtifact.atPath('template.yml'),
+          adminPermissions: false,
+          region,
+        }),
+      ],
+    },
+  ],
 });
 
 app.run();

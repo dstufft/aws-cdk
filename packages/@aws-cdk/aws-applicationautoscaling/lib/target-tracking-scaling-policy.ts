@@ -1,6 +1,6 @@
 import cloudwatch = require('@aws-cdk/aws-cloudwatch');
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from './applicationautoscaling.generated';
+import { CfnScalingPolicy } from './applicationautoscaling.generated';
 import { ScalableTarget } from './scalable-target';
 
 /**
@@ -104,7 +104,7 @@ export class TargetTrackingScalingPolicy extends cdk.Construct {
    */
   public readonly scalingPolicyArn: string;
 
-  constructor(parent: cdk.Construct, id: string, props: TargetTrackingScalingPolicyProps) {
+  constructor(scope: cdk.Construct, id: string, props: TargetTrackingScalingPolicyProps) {
     if ((props.customMetric === undefined) === (props.predefinedMetric === undefined)) {
       throw new Error(`Exactly one of 'customMetric' or 'predefinedMetric' must be specified.`);
     }
@@ -116,10 +116,10 @@ export class TargetTrackingScalingPolicy extends cdk.Construct {
       throw new RangeError(`scaleOutCooldown cannot be negative, got: ${props.scaleOutCooldownSec}`);
     }
 
-    super(parent, id);
+    super(scope, id);
 
-    const resource = new cloudformation.ScalingPolicyResource(this, 'Resource', {
-      policyName: props.policyName || this.uniqueId,
+    const resource = new CfnScalingPolicy(this, 'Resource', {
+      policyName: props.policyName || this.node.uniqueId,
       policyType: 'TargetTrackingScaling',
       scalingTargetId: props.scalingTarget.scalableTargetId,
       targetTrackingScalingPolicyConfiguration: {
@@ -139,7 +139,7 @@ export class TargetTrackingScalingPolicy extends cdk.Construct {
   }
 }
 
-function renderCustomMetric(metric?: cloudwatch.Metric): cloudformation.ScalingPolicyResource.CustomizedMetricSpecificationProperty | undefined {
+function renderCustomMetric(metric?: cloudwatch.Metric): CfnScalingPolicy.CustomizedMetricSpecificationProperty | undefined {
   if (!metric) { return undefined; }
   return {
     dimensions: metric.dimensionsAsList(),

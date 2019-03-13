@@ -1,7 +1,7 @@
 import iam = require('@aws-cdk/aws-iam');
 import cdk = require('@aws-cdk/cdk');
-import { ContainerDefinition, ContainerDefinitionProps } from '../container-definition';
-import { cloudformation } from '../ecs.generated';
+import { ContainerDefinition, ContainerDefinitionOptions } from '../container-definition';
+import { CfnTaskDefinition } from '../ecs.generated';
 import { isEc2Compatible, isFargateCompatible } from '../util';
 
 /**
@@ -134,6 +134,13 @@ export class TaskDefinition extends cdk.Construct {
   public compatibility: Compatibility;
 
   /**
+   * Execution role for this task definition
+   *
+   * May not exist, will be created as needed.
+   */
+  public executionRole?: iam.IRole;
+
+  /**
    * All containers
    */
   protected readonly containers = new Array<ContainerDefinition>();
@@ -141,24 +148,17 @@ export class TaskDefinition extends cdk.Construct {
   /**
    * All volumes
    */
-  private readonly volumes: cloudformation.TaskDefinitionResource.VolumeProperty[] = [];
-
-  /**
-   * Execution role for this task definition
-   *
-   * Will be created as needed.
-   */
-  private executionRole?: iam.Role;
+  private readonly volumes: Volume[] = [];
 
   /**
    * Placement constraints for task instances
    */
-  private readonly placementConstraints = new Array<cloudformation.TaskDefinitionResource.TaskDefinitionPlacementConstraintProperty>();
+  private readonly placementConstraints = new Array<CfnTaskDefinition.TaskDefinitionPlacementConstraintProperty>();
 
-  constructor(parent: cdk.Construct, name: string, props: TaskDefinitionProps) {
-    super(parent, name);
+  constructor(scope: cdk.Construct, id: string, props: TaskDefinitionProps) {
+    super(scope, id);
 
-    this.family = props.family || this.uniqueId;
+    this.family = props.family || this.node.uniqueId;
     this.compatibility = props.compatibility;
 
     if (props.volumes) {
@@ -185,10 +185,10 @@ export class TaskDefinition extends cdk.Construct {
         assumedBy: new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
     });
 
-    const taskDef = new cloudformation.TaskDefinitionResource(this, 'Resource', {
+    const taskDef = new CfnTaskDefinition(this, 'Resource', {
       containerDefinitions: new cdk.Token(() => this.containers.map(x => x.renderContainerDefinition())),
       volumes: new cdk.Token(() => this.volumes),
-      executionRoleArn: new cdk.Token(() => this.executionRole && this.executionRole.roleArn),
+      executionRoleArn: new cdk.Token(() => this.executionRole && this.executionRole.roleArn).toString(),
       family: this.family,
       taskRoleArn: this.taskRole.roleArn,
       requiresCompatibilities: [
@@ -225,14 +225,18 @@ export class TaskDefinition extends cdk.Construct {
   /**
    * Create a new container to this task definition
    */
-  public addContainer(id: string, props: ContainerDefinitionProps) {
-    const container = new ContainerDefinition(this, id, this, props);
+  public addContainer(id: string, props: ContainerDefinitionOptions) {
+    return new ContainerDefinition(this, id, { taskDefinition: this, ...props });
+  }
+
+  /**
+   * (internal) Links a container to this task definition.
+   */
+  public _linkContainer(container: ContainerDefinition) {
     this.containers.push(container);
     if (this.defaultContainer === undefined && container.essential) {
       this.defaultContainer = container;
     }
-
-    return container;
   }
 
   /**
@@ -240,25 +244,6 @@ export class TaskDefinition extends cdk.Construct {
    */
   public addVolume(volume: Volume) {
     this.volumes.push(volume);
-  }
-
-  /**
-   * Validate this task definition
-   */
-  public validate(): string[] {
-    const ret = super.validate();
-
-    if (isEc2Compatible(this.compatibility)) {
-      // EC2 mode validations
-
-      // Container sizes
-      for (const container of this.containers) {
-        if (!container.memoryLimitSpecified) {
-          ret.push(`ECS Container ${container.id} must have at least one of 'memoryLimitMiB' or 'memoryReservationMiB' specified`);
-        }
-      }
-    }
-    return ret;
   }
 
   /**
@@ -295,9 +280,28 @@ export class TaskDefinition extends cdk.Construct {
   }
 
   /**
+   * Validate this task definition
+   */
+  protected validate(): string[] {
+    const ret = super.validate();
+
+    if (isEc2Compatible(this.compatibility)) {
+      // EC2 mode validations
+
+      // Container sizes
+      for (const container of this.containers) {
+        if (!container.memoryLimitSpecified) {
+          ret.push(`ECS Container ${container.node.id} must have at least one of 'memoryLimitMiB' or 'memoryReservationMiB' specified`);
+        }
+      }
+    }
+    return ret;
+  }
+
+  /**
    * Render the placement constraints
    */
-  private renderPlacementConstraint(pc: PlacementConstraint): cloudformation.TaskDefinitionResource.TaskDefinitionPlacementConstraintProperty {
+  private renderPlacementConstraint(pc: PlacementConstraint): CfnTaskDefinition.TaskDefinitionPlacementConstraintProperty {
     return {
       type: pc.type,
       expression: pc.expression
@@ -345,8 +349,12 @@ export interface Volume {
   /**
    * A name for the volume
    */
-  name?: string;
-  // FIXME add dockerVolumeConfiguration
+  name: string;
+
+  /**
+   * Specifies this configuration when using Docker volumes
+   */
+  dockerVolumeConfiguration?: DockerVolumeConfiguration;
 }
 
 /**
@@ -357,6 +365,50 @@ export interface Host {
    * Source path on the host
    */
   sourcePath?: string;
+}
+
+/**
+ * A configuration of a Docker volume
+ */
+export interface DockerVolumeConfiguration {
+  /**
+   * If true, the Docker volume is created if it does not already exist
+   *
+   * @default false
+   */
+  autoprovision?: boolean;
+  /**
+   * The Docker volume driver to use
+   */
+  driver: string;
+  /**
+   * A map of Docker driver specific options passed through
+   *
+   * @default No options
+   */
+  driverOpts?: string[];
+  /**
+   * Custom metadata to add to your Docker volume
+   *
+   * @default No labels
+   */
+  labels?: string[];
+  /**
+   * The scope for the Docker volume which determines it's lifecycle
+   */
+  scope: Scope;
+}
+
+export enum Scope {
+  /**
+   * Docker volumes are automatically provisioned when the task starts and destroyed when the task stops
+   */
+  Task = "task",
+
+  /**
+   * Docker volumes are persist after the task stops
+   */
+  Shared = "shared"
 }
 
 /**

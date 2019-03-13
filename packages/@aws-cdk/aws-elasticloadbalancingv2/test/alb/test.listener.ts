@@ -63,6 +63,7 @@ export = {
     expect(stack).to(haveResource('AWS::EC2::SecurityGroup', {
       SecurityGroupIngress: [
         {
+          Description: 'Allow from anyone on port 80',
           CidrIp: "0.0.0.0/0",
           FromPort: 80,
           IpProtocol: "tcp",
@@ -87,7 +88,7 @@ export = {
     });
 
     // THEN
-    const errors = stack.validateTree();
+    const errors = stack.node.validateTree();
     test.deepEqual(errors.map(e => e.message), ['HTTPS Listener needs at least one certificate (call addCertificateArns)']);
 
     test.done();
@@ -108,6 +109,26 @@ export = {
     // THEN
     expect(stack).to(haveResource('AWS::ElasticLoadBalancingV2::TargetGroup', {
       TargetType: 'ip'
+    }));
+
+    test.done();
+  },
+
+  'Can configure name on TargetGroups'(test: Test) {
+    // GIVEN
+    const stack = new cdk.Stack();
+    const vpc = new ec2.VpcNetwork(stack, 'Stack');
+
+    // WHEN
+    new elbv2.ApplicationTargetGroup(stack, 'TargetGroup', {
+      vpc,
+      port: 80,
+      targetGroupName: 'foo'
+    });
+
+    // THEN
+    expect(stack).to(haveResource('AWS::ElasticLoadBalancingV2::TargetGroup', {
+      Name: 'foo'
     }));
 
     test.done();
@@ -364,8 +385,7 @@ export = {
     const group = new elbv2.ApplicationTargetGroup(stack, 'TargetGroup', { vpc, port: 80 });
 
     // WHEN
-    const resource = new cdk.Resource(stack, 'SomeResource', { type: 'Test::Resource' });
-    resource.addDependency(group.loadBalancerDependency());
+    new ResourceWithLBDependency(stack, 'SomeResource', group);
 
     loadBalancer.addListener('Listener', {
       port: 80,
@@ -389,7 +409,12 @@ export = {
     // GIVEN
     const stack = new cdk.Stack();
     const vpc = new ec2.VpcNetwork(stack, 'VPC');
+    const lb = new elbv2.ApplicationLoadBalancer(stack, 'LB', { vpc });
     const group = new elbv2.ApplicationTargetGroup(stack, 'TargetGroup', { vpc, port: 80 });
+    lb.addListener('SomeListener', {
+      port: 80,
+      defaultTargetGroups: [group]
+    });
 
     // WHEN
     const metrics = [];
@@ -404,16 +429,17 @@ export = {
 
     for (const metric of metrics) {
       test.equal('AWS/ApplicationELB', metric.namespace);
-      const firstArn = { "Fn::Select": [0, { "Fn::GetAtt": ["TargetGroup3D7CD9B8", "LoadBalancerArns"] }] };
-      test.deepEqual(cdk.resolve(metric.dimensions), {
+      const loadBalancerArn = { Ref: "LBSomeListenerCA01F1A0" };
+
+      test.deepEqual(lb.node.resolve(metric.dimensions), {
          TargetGroup: { 'Fn::GetAtt': [ 'TargetGroup3D7CD9B8', 'TargetGroupFullName' ] },
          LoadBalancer: { 'Fn::Join':
             [ '',
-              [ { 'Fn::Select': [ 1, { 'Fn::Split': [ '/', firstArn ] } ] },
+              [ { 'Fn::Select': [ 1, { 'Fn::Split': [ '/', loadBalancerArn ] } ] },
                 '/',
-                { 'Fn::Select': [ 2, { 'Fn::Split': [ '/', firstArn ] } ] },
+                { 'Fn::Select': [ 2, { 'Fn::Split': [ '/', loadBalancerArn ] } ] },
                 '/',
-                { 'Fn::Select': [ 3, { 'Fn::Split': [ '/', firstArn ] } ] }
+                { 'Fn::Select': [ 3, { 'Fn::Split': [ '/', loadBalancerArn ] } ] }
               ]
             ]
          }
@@ -436,8 +462,7 @@ export = {
     });
 
     // WHEN
-    const resource = new cdk.Resource(stack, 'SomeResource', { type: 'Test::Resource' });
-    resource.addDependency(group2.loadBalancerDependency());
+    new ResourceWithLBDependency(stack, 'SomeResource', group2);
 
     listener.addTargetGroups('SecondGroup', {
       pathPattern: '/bla',
@@ -458,3 +483,10 @@ export = {
     test.done();
   },
 };
+
+class ResourceWithLBDependency extends cdk.Resource {
+  constructor(scope: cdk.Construct, id: string, targetGroup: elbv2.ITargetGroup) {
+    super(scope, id, { type: 'Test::Resource' });
+    this.node.addDependency(targetGroup.loadBalancerAttached);
+  }
+}

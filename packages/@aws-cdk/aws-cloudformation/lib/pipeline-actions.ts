@@ -5,8 +5,7 @@ import cdk = require('@aws-cdk/cdk');
 /**
  * Properties common to all CloudFormation actions
  */
-export interface PipelineCloudFormationActionProps extends codepipeline.CommonActionProps,
-    codepipeline.CommonActionConstructProps {
+export interface PipelineCloudFormationActionProps extends codepipeline.CommonActionProps {
   /**
    * The name of the stack to apply this action to
    */
@@ -44,6 +43,15 @@ export interface PipelineCloudFormationActionProps extends codepipeline.CommonAc
    * @default the Action resides in the same region as the Pipeline
    */
   region?: string;
+
+  /**
+   * The service role that is assumed during execution of action.
+   * This role is not mandatory, however more advanced configuration
+   * may require specifying it.
+   *
+   * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-codepipeline-pipeline-stages-actions.html
+   */
+  role?: iam.IRole;
 }
 
 /**
@@ -57,10 +65,9 @@ export abstract class PipelineCloudFormationAction extends codepipeline.Action {
    */
   public outputArtifact?: codepipeline.Artifact;
 
-  constructor(parent: cdk.Construct, id: string, props: PipelineCloudFormationActionProps, configuration?: any) {
-    super(parent, id, {
-      stage: props.stage,
-      runOrder: props.runOrder,
+  constructor(props: PipelineCloudFormationActionProps, configuration?: any) {
+    super({
+      ...props,
       region: props.region,
       artifactBounds: {
         minInputs: 0,
@@ -79,7 +86,7 @@ export abstract class PipelineCloudFormationAction extends codepipeline.Action {
 
     if (props.outputFileName) {
       this.outputArtifact = this.addOutputArtifact(props.outputArtifactName ||
-        (props.stage.name + this.id + 'Artifact'));
+        (`${props.actionName}_${props.stackName}_Artifact`));
     }
   }
 }
@@ -98,14 +105,20 @@ export interface PipelineExecuteChangeSetActionProps extends PipelineCloudFormat
  * CodePipeline action to execute a prepared change set.
  */
 export class PipelineExecuteChangeSetAction extends PipelineCloudFormationAction {
-  constructor(parent: cdk.Construct, id: string, props: PipelineExecuteChangeSetActionProps) {
-    super(parent, id, props, {
+  private readonly props: PipelineExecuteChangeSetActionProps;
+
+  constructor(props: PipelineExecuteChangeSetActionProps) {
+    super(props, {
       ActionMode: 'CHANGE_SET_EXECUTE',
       ChangeSetName: props.changeSetName,
     });
 
-    SingletonPolicy.forRole(props.stage.pipeline.role)
-                   .grantExecuteChangeSet(props);
+    this.props = props;
+  }
+
+  protected bind(stage: codepipeline.IStage, _scope: cdk.Construct): void {
+    SingletonPolicy.forRole(stage.pipeline.role)
+      .grantExecuteChangeSet(this.props);
   }
 }
 
@@ -118,24 +131,25 @@ export interface PipelineCloudFormationDeployActionProps extends PipelineCloudFo
    * IAM role to assume when deploying changes.
    *
    * If not specified, a fresh role is created. The role is created with zero
-   * permissions unless `fullPermissions` is true, in which case the role will have
+   * permissions unless `adminPermissions` is true, in which case the role will have
    * full permissions.
    *
-   * @default A fresh role with full or no permissions (depending on the value of `fullPermissions`).
+   * @default A fresh role with full or no permissions (depending on the value of `adminPermissions`).
    */
-  role?: iam.Role;
+  deploymentRole?: iam.IRole;
 
   /**
    * Acknowledge certain changes made as part of deployment
    *
    * For stacks that contain certain resources, explicit acknowledgement that AWS CloudFormation
-   * might create or update those resources. For example, you must specify CAPABILITY_IAM if your
-   * stack template contains AWS Identity and Access Management (IAM) resources. For more
-   * information, see [Acknowledging IAM Resources in AWS CloudFormation Templates](https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-iam-template.html#using-iam-capabilities).
+   * might create or update those resources. For example, you must specify `AnonymousIAM` or `NamedIAM`
+   * if your stack template contains AWS Identity and Access Management (IAM) resources. For more
+   * information see the link below.
    *
-   * @default No capabitilities passed, unless `fullPermissions` is true
+   * @see https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-iam-template.html#using-iam-capabilities
+   * @default None, unless `adminPermissions` is true
    */
-  capabilities?: CloudFormationCapabilities[];
+  capabilities?: CloudFormationCapabilities;
 
   /**
    * Whether to grant full permissions to CloudFormation while deploying this template.
@@ -151,10 +165,8 @@ export interface PipelineCloudFormationDeployActionProps extends PipelineCloudFo
    * are deployed in this pipeline. If you want more fine-grained permissions,
    * use `addToRolePolicy` and `capabilities` to control what the CloudFormation
    * deployment is allowed to do.
-   *
-   * @default false
    */
-  fullPermissions?: boolean;
+  adminPermissions: boolean;
 
   /**
    * Input artifact to use for template parameters values and stack policy.
@@ -195,41 +207,57 @@ export interface PipelineCloudFormationDeployActionProps extends PipelineCloudFo
  * Base class for all CloudFormation actions that execute or stage deployments.
  */
 export abstract class PipelineCloudFormationDeployAction extends PipelineCloudFormationAction {
-  public readonly role: iam.Role;
+  private _deploymentRole?: iam.IRole;
+  private readonly props: PipelineCloudFormationDeployActionProps;
 
-  constructor(parent: cdk.Construct, id: string, props: PipelineCloudFormationDeployActionProps, configuration: any) {
-    const capabilities = props.fullPermissions && props.capabilities === undefined ? [CloudFormationCapabilities.NamedIAM] : props.capabilities;
-
-    super(parent, id, props, {
+  constructor(props: PipelineCloudFormationDeployActionProps, configuration: any) {
+    const capabilities = props.adminPermissions && props.capabilities === undefined ? CloudFormationCapabilities.NamedIAM : props.capabilities;
+    super(props, {
       ...configuration,
-      // This must be a string, so flatten the list to a comma-separated string.
-      Capabilities: (capabilities && capabilities.join(',')) || undefined,
-      RoleArn: new cdk.Token(() => this.role.roleArn),
-      ParameterOverrides: cdk.CloudFormationJSON.stringify(props.parameterOverrides),
+      // None evaluates to empty string which is falsey and results in undefined
+      Capabilities: (capabilities && capabilities.toString()) || undefined,
+      RoleArn: new cdk.Token(() => this.deploymentRole.roleArn),
+      ParameterOverrides: new cdk.Token(() => this.scope.node.stringifyJson(props.parameterOverrides)),
       TemplateConfiguration: props.templateConfiguration ? props.templateConfiguration.location : undefined,
       StackName: props.stackName,
     });
 
-    if (props.role) {
-      this.role = props.role;
-    } else {
-      this.role = new iam.Role(this, 'Role', {
-        assumedBy: new iam.ServicePrincipal('cloudformation.amazonaws.com')
-      });
-
-      if (props.fullPermissions) {
-        this.role.addToPolicy(new iam.PolicyStatement().addAction('*').addAllResources());
-      }
-    }
-
-    SingletonPolicy.forRole(props.stage.pipeline.role).grantPassRole(this.role);
+    this.props = props;
   }
 
   /**
    * Add statement to the service role assumed by CloudFormation while executing this action.
    */
-  public addToRolePolicy(statement: iam.PolicyStatement) {
-    return this.role.addToPolicy(statement);
+  public addToDeploymentRolePolicy(statement: iam.PolicyStatement) {
+    return this.getDeploymentRole('method addToRolePolicy()').addToPolicy(statement);
+  }
+
+  public get deploymentRole(): iam.IRole {
+    return this.getDeploymentRole('property role()');
+  }
+
+  protected bind(stage: codepipeline.IStage, scope: cdk.Construct): void {
+    if (this.props.deploymentRole) {
+      this._deploymentRole = this.props.deploymentRole;
+    } else {
+      this._deploymentRole = new iam.Role(scope, 'Role', {
+        assumedBy: new iam.ServicePrincipal('cloudformation.amazonaws.com')
+      });
+
+      if (this.props.adminPermissions) {
+        this._deploymentRole.addToPolicy(new iam.PolicyStatement().addAction('*').addAllResources());
+      }
+    }
+
+    SingletonPolicy.forRole(stage.pipeline.role).grantPassRole(this._deploymentRole);
+  }
+
+  private getDeploymentRole(member: string): iam.IRole {
+    if (this._deploymentRole) {
+      return this._deploymentRole;
+    } else {
+      throw new Error(`Cannot use the ${member} before the Action has been added to a Pipeline`);
+    }
   }
 }
 
@@ -255,19 +283,28 @@ export interface PipelineCreateReplaceChangeSetActionProps extends PipelineCloud
  * If the change set exists, AWS CloudFormation deletes it, and then creates a new one.
  */
 export class PipelineCreateReplaceChangeSetAction extends PipelineCloudFormationDeployAction {
-  constructor(parent: cdk.Construct, id: string, props: PipelineCreateReplaceChangeSetActionProps) {
-    super(parent, id, props, {
+  private readonly props2: PipelineCreateReplaceChangeSetActionProps;
+
+  constructor(props: PipelineCreateReplaceChangeSetActionProps) {
+    super(props, {
       ActionMode: 'CHANGE_SET_REPLACE',
       ChangeSetName: props.changeSetName,
       TemplatePath: props.templatePath.location,
     });
 
     this.addInputArtifact(props.templatePath.artifact);
-    if (props.templateConfiguration && props.templateConfiguration.artifact.name !== props.templatePath.artifact.name) {
+    if (props.templateConfiguration &&
+        props.templateConfiguration.artifact.artifactName !== props.templatePath.artifact.artifactName) {
       this.addInputArtifact(props.templateConfiguration.artifact);
     }
 
-    SingletonPolicy.forRole(props.stage.pipeline.role).grantCreateReplaceChangeSet(props);
+    this.props2 = props;
+  }
+
+  protected bind(stage: codepipeline.IStage, scope: cdk.Construct): void {
+    super.bind(stage, scope);
+
+    SingletonPolicy.forRole(stage.pipeline.role).grantCreateReplaceChangeSet(this.props2);
   }
 }
 
@@ -311,18 +348,27 @@ export interface PipelineCreateUpdateStackActionProps extends PipelineCloudForma
  * troubleshooting them. You would typically choose this mode for testing.
  */
 export class PipelineCreateUpdateStackAction extends PipelineCloudFormationDeployAction {
-  constructor(parent: cdk.Construct, id: string, props: PipelineCreateUpdateStackActionProps) {
-    super(parent, id, props, {
+  private readonly props2: PipelineCreateUpdateStackActionProps;
+
+  constructor(props: PipelineCreateUpdateStackActionProps) {
+    super(props, {
       ActionMode: props.replaceOnFailure ? 'REPLACE_ON_FAILURE' : 'CREATE_UPDATE',
       TemplatePath: props.templatePath.location
     });
 
     this.addInputArtifact(props.templatePath.artifact);
-    if (props.templateConfiguration && props.templateConfiguration.artifact.name !== props.templatePath.artifact.name) {
+    if (props.templateConfiguration &&
+        props.templateConfiguration.artifact.artifactName !== props.templatePath.artifact.artifactName) {
       this.addInputArtifact(props.templateConfiguration.artifact);
     }
 
-    SingletonPolicy.forRole(props.stage.pipeline.role).grantCreateUpdateStack(props);
+    this.props2 = props;
+  }
+
+  protected bind(stage: codepipeline.IStage, scope: cdk.Construct): void {
+    super.bind(stage, scope);
+
+    SingletonPolicy.forRole(stage.pipeline.role).grantCreateUpdateStack(this.props2);
   }
 }
 
@@ -340,11 +386,20 @@ export interface PipelineDeleteStackActionProps extends PipelineCloudFormationDe
  * without deleting a stack.
  */
 export class PipelineDeleteStackAction extends PipelineCloudFormationDeployAction {
-  constructor(parent: cdk.Construct, id: string, props: PipelineDeleteStackActionProps) {
-    super(parent, id, props, {
+  private readonly props2: PipelineDeleteStackActionProps;
+
+  constructor(props: PipelineDeleteStackActionProps) {
+    super(props, {
       ActionMode: 'DELETE_ONLY',
     });
-    SingletonPolicy.forRole(props.stage.pipeline.role).grantDeleteStack(props);
+
+    this.props2 = props;
+  }
+
+  protected bind(stage: codepipeline.IStage, scope: cdk.Construct): void {
+    super.bind(stage, scope);
+
+    SingletonPolicy.forRole(stage.pipeline.role).grantDeleteStack(this.props2);
   }
 }
 
@@ -353,11 +408,20 @@ export class PipelineDeleteStackAction extends PipelineCloudFormationDeployActio
  */
 export enum CloudFormationCapabilities {
   /**
+   * No IAM Capabilities
+   *
+   * Pass this capability if you wish to block the creation IAM resources.
+   * @link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-iam-template.html#using-iam-capabilities
+   */
+  None = '',
+
+  /**
    * Capability to create anonymous IAM resources
    *
    * Pass this capability if you're only creating anonymous resources.
+   * @link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-iam-template.html#using-iam-capabilities
    */
-  IAM = 'CAPABILITY_IAM',
+  AnonymousIAM = 'CAPABILITY_IAM',
 
   /**
    * Capability to create named IAM resources.
@@ -366,8 +430,9 @@ export enum CloudFormationCapabilities {
    * names.
    *
    * `CloudFormationCapabilities.NamedIAM` implies `CloudFormationCapabilities.IAM`; you don't have to pass both.
+   * @link https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/using-iam-template.html#using-iam-capabilities
    */
-  NamedIAM = 'CAPABILITY_NAMED_IAM'
+  NamedIAM = 'CAPABILITY_NAMED_IAM',
 }
 
 /**
@@ -386,7 +451,7 @@ class SingletonPolicy extends cdk.Construct {
    * @returns the SingletonPolicy for this role.
    */
   public static forRole(role: iam.Role): SingletonPolicy {
-    const found = role.tryFindChild(SingletonPolicy.UUID);
+    const found = role.node.tryFindChild(SingletonPolicy.UUID);
     return (found as SingletonPolicy) || new SingletonPolicy(role);
   }
 
@@ -402,7 +467,7 @@ class SingletonPolicy extends cdk.Construct {
     this.statementFor({
       actions: ['cloudformation:ExecuteChangeSet'],
       conditions: { StringEquals: { 'cloudformation:ChangeSetName': props.changeSetName } },
-    }).addResource(stackArnFromProps(props));
+    }).addResource(this.stackArnFromProps(props));
   }
 
   public grantCreateReplaceChangeSet(props: { stackName: string, changeSetName: string, region?: string }): void {
@@ -414,7 +479,7 @@ class SingletonPolicy extends cdk.Construct {
         'cloudformation:DescribeStacks',
       ],
       conditions: { StringEqualsIfExists: { 'cloudformation:ChangeSetName': props.changeSetName } },
-    }).addResource(stackArnFromProps(props));
+    }).addResource(this.stackArnFromProps(props));
   }
 
   public grantCreateUpdateStack(props: { stackName: string, replaceOnFailure?: boolean, region?: string }): void {
@@ -430,7 +495,7 @@ class SingletonPolicy extends cdk.Construct {
     if (props.replaceOnFailure) {
       actions.push('cloudformation:DeleteStack');
     }
-    this.statementFor({ actions }).addResource(stackArnFromProps(props));
+    this.statementFor({ actions }).addResource(this.stackArnFromProps(props));
   }
 
   public grantDeleteStack(props: { stackName: string, region?: string }): void {
@@ -439,10 +504,10 @@ class SingletonPolicy extends cdk.Construct {
         'cloudformation:DescribeStack*',
         'cloudformation:DeleteStack',
       ]
-    }).addResource(stackArnFromProps(props));
+    }).addResource(this.stackArnFromProps(props));
   }
 
-  public grantPassRole(role: iam.Role): void {
+  public grantPassRole(role: iam.IRole): void {
     this.statementFor({ actions: ['iam:PassRole'] }).addResource(role.roleArn);
   }
 
@@ -477,6 +542,15 @@ class SingletonPolicy extends cdk.Construct {
       }
     }
   }
+
+  private stackArnFromProps(props: { stackName: string, region?: string }): string {
+    return this.node.stack.formatArn({
+      region: props.region,
+      service: 'cloudformation',
+      resource: 'stack',
+      resourceName: `${props.stackName}/*`
+    });
+  }
 }
 
 interface StatementTemplate {
@@ -485,12 +559,3 @@ interface StatementTemplate {
 }
 
 type StatementCondition = { [op: string]: { [attribute: string]: string } };
-
-function stackArnFromProps(props: { stackName: string, region?: string }): string {
-  return cdk.ArnUtils.fromComponents({
-    region: props.region,
-    service: 'cloudformation',
-    resource: 'stack',
-    resourceName: `${props.stackName}/*`
-  });
-}

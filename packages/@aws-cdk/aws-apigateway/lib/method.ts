@@ -1,7 +1,8 @@
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from './apigateway.generated';
-import { Integration } from './integration';
+import { CfnMethod, CfnMethodProps } from './apigateway.generated';
+import { ConnectionType, Integration } from './integration';
 import { MockIntegration } from './integrations/mock';
+import { MethodResponse } from './methodresponse';
 import { IRestApiResource } from './resource';
 import { RestApi } from './restapi';
 import { validateHttpMethod } from './util';
@@ -23,7 +24,7 @@ export interface MethodOptions {
    * If `authorizationType` is `Custom`, this specifies the ID of the method
    * authorizer resource.
    *
-   * NOTE: in the future this will be replaced with an `AuthorizerRef`
+   * NOTE: in the future this will be replaced with an `IAuthorizer`
    * construct.
    */
   authorizerId?: string;
@@ -34,11 +35,30 @@ export interface MethodOptions {
    */
   apiKeyRequired?: boolean;
 
+  /**
+   * The responses that can be sent to the client who calls the method.
+   * @default None
+   *
+   * This property is not required, but if these are not supplied for a Lambda
+   * proxy integration, the Lambda function must return a value of the correct format,
+   * for the integration response to be correctly mapped to a response to the client.
+   * @see https://docs.aws.amazon.com/apigateway/latest/developerguide/api-gateway-method-settings-method-response.html
+   */
+  methodResponses?: MethodResponse[]
+
+  /**
+   * The request parameters that API Gateway accepts. Specify request parameters
+   * as key-value pairs (string-to-Boolean mapping), with a source as the key and
+   * a Boolean as the value. The Boolean specifies whether a parameter is required.
+   * A source must match the format method.request.location.name, where the location
+   * is querystring, path, or header, and name is a valid, unique parameter name.
+   * @default None
+   */
+  requestParameters?: { [param: string]: boolean };
+
   // TODO:
   // - RequestValidatorId
   // - RequestModels
-  // - RequestParameters
-  // - MethodResponses
 }
 
 export interface MethodProps {
@@ -70,12 +90,12 @@ export class Method extends cdk.Construct {
   public readonly resource: IRestApiResource;
   public readonly restApi: RestApi;
 
-  constructor(parent: cdk.Construct, id: string, props: MethodProps) {
-    super(parent, id);
+  constructor(scope: cdk.Construct, id: string, props: MethodProps) {
+    super(scope, id);
 
     this.resource = props.resource;
     this.restApi = props.resource.resourceApi;
-    this.httpMethod = props.httpMethod;
+    this.httpMethod = props.httpMethod.toUpperCase();
 
     validateHttpMethod(this.httpMethod);
 
@@ -83,18 +103,20 @@ export class Method extends cdk.Construct {
 
     const defaultMethodOptions = props.resource.defaultMethodOptions || {};
 
-    const methodProps: cloudformation.MethodResourceProps = {
+    const methodProps: CfnMethodProps = {
       resourceId: props.resource.resourceId,
       restApiId: this.restApi.restApiId,
-      httpMethod: props.httpMethod,
+      httpMethod: this.httpMethod,
       operationName: options.operationName || defaultMethodOptions.operationName,
       apiKeyRequired: options.apiKeyRequired || defaultMethodOptions.apiKeyRequired,
       authorizationType: options.authorizationType || defaultMethodOptions.authorizationType || AuthorizationType.None,
       authorizerId: options.authorizerId || defaultMethodOptions.authorizerId,
-      integration: this.renderIntegration(props.integration)
+      requestParameters: options.requestParameters,
+      integration: this.renderIntegration(props.integration),
+      methodResponses: this.renderMethodResponses(options.methodResponses),
     };
 
-    const resource = new cloudformation.MethodResource(this, 'Resource', methodProps);
+    const resource = new CfnMethod(this, 'Resource', methodProps);
 
     this.methodId = resource.ref;
 
@@ -102,7 +124,7 @@ export class Method extends cdk.Construct {
 
     const deployment = props.resource.resourceApi.latestDeployment;
     if (deployment) {
-      deployment.addDependency(resource);
+      deployment.node.addDependency(resource);
       deployment.addToLogicalId({ method: methodProps });
     }
   }
@@ -118,7 +140,7 @@ export class Method extends cdk.Construct {
   public get methodArn(): string {
     if (!this.restApi.deploymentStage) {
       throw new Error(
-        `Unable to determine ARN for method "${this.id}" since there is no stage associated with this API.\n` +
+        `Unable to determine ARN for method "${this.node.id}" since there is no stage associated with this API.\n` +
         'Either use the `deploy` prop or explicitly assign `deploymentStage` on the RestApi');
     }
 
@@ -134,7 +156,7 @@ export class Method extends cdk.Construct {
     return this.restApi.executeApiArn(this.httpMethod, this.resource.resourcePath, 'test-invoke-stage');
   }
 
-  private renderIntegration(integration?: Integration): cloudformation.MethodResource.IntegrationProperty {
+  private renderIntegration(integration?: Integration): CfnMethod.IntegrationProperty {
     if (!integration) {
       // use defaultIntegration from API if defined
       if (this.resource.defaultIntegration) {
@@ -154,11 +176,20 @@ export class Method extends cdk.Construct {
       throw new Error(`'credentialsPassthrough' and 'credentialsRole' are mutually exclusive`);
     }
 
+    if (options.connectionType === ConnectionType.VpcLink && options.vpcLink === undefined) {
+      throw new Error(`'connectionType' of VPC_LINK requires 'vpcLink' prop to be set`);
+    }
+
+    if (options.connectionType === ConnectionType.Internet && options.vpcLink !== undefined) {
+      throw new Error(`cannot set 'vpcLink' where 'connectionType' is INTERNET`);
+    }
+
     if (options.credentialsRole) {
       credentials = options.credentialsRole.roleArn;
     } else if (options.credentialsPassthrough) {
       // arn:aws:iam::*:user/*
-      credentials = cdk.ArnUtils.fromComponents({ service: 'iam', region: '', account: '*', resource: 'user', sep: '/', resourceName: '*' });
+      // tslint:disable-next-line:max-line-length
+      credentials = this.node.stack.formatArn({ service: 'iam', region: '', account: '*', resource: 'user', sep: '/', resourceName: '*' });
     }
 
     return {
@@ -172,8 +203,38 @@ export class Method extends cdk.Construct {
       requestTemplates: options.requestTemplates,
       passthroughBehavior: options.passthroughBehavior,
       integrationResponses: options.integrationResponses,
+      connectionType: options.connectionType,
+      connectionId: options.vpcLink ? options.vpcLink.vpcLinkId : undefined,
       credentials,
     };
+  }
+
+  private renderMethodResponses(methodResponses: MethodResponse[] | undefined): CfnMethod.MethodResponseProperty[] | undefined {
+    if (!methodResponses) {
+      // Fall back to nothing
+      return undefined;
+    }
+
+    return methodResponses.map(mr => {
+      let responseModels: {[contentType: string]: string} | undefined;
+
+      if (mr.responseModels) {
+        responseModels = {};
+        for (const contentType in mr.responseModels) {
+          if (mr.responseModels.hasOwnProperty(contentType)) {
+            responseModels[contentType] = mr.responseModels[contentType].modelId;
+          }
+        }
+      }
+
+      const methodResponseProp = {
+        statusCode: mr.statusCode,
+        responseParameters: mr.responseParameters,
+        responseModels,
+      };
+
+      return methodResponseProp;
+    });
   }
 }
 

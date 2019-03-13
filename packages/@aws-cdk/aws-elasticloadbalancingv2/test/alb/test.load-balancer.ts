@@ -1,7 +1,8 @@
-import { expect, haveResource } from '@aws-cdk/assert';
+import { expect, haveResource, ResourcePart } from '@aws-cdk/assert';
 import ec2 = require('@aws-cdk/aws-ec2');
 import s3 = require('@aws-cdk/aws-s3');
 import cdk = require('@aws-cdk/cdk');
+import { Stack } from '@aws-cdk/cdk';
 import { Test } from 'nodeunit';
 import elbv2 = require('../../lib');
 
@@ -27,6 +28,29 @@ export = {
       ],
       Type: "application"
     }));
+
+    test.done();
+  },
+
+  'internet facing load balancer has dependency on IGW'(test: Test) {
+    // GIVEN
+    const stack = new cdk.Stack();
+    const vpc = new ec2.VpcNetwork(stack, 'Stack');
+
+    // WHEN
+    new elbv2.ApplicationLoadBalancer(stack, 'LB', {
+      vpc,
+      internetFacing: true,
+    });
+
+    // THEN
+    expect(stack).to(haveResource('AWS::ElasticLoadBalancingV2::LoadBalancer', {
+      DependsOn: [
+        'StackPublicSubnet1DefaultRoute16154E3D',
+        'StackPublicSubnet2DefaultRoute0319539B',
+        'StackPublicSubnet3DefaultRouteBC0DA152'
+      ]
+    }, ResourcePart.CompleteDefinition));
 
     test.done();
   },
@@ -112,9 +136,11 @@ export = {
     }));
     expect(stack).to(haveResource('AWS::S3::BucketPolicy', {
       PolicyDocument: {
+        Version: '2012-10-17',
         Statement: [
           {
             Action: "s3:PutObject",
+            Effect: 'Allow',
             Principal: { AWS: { "Fn::Join": [ "", [ "arn:", { Ref: "AWS::Partition" }, ":iam::127311923021:root" ] ] } },
             Resource: { "Fn::Join": [ "", [ { "Fn::GetAtt": [ "AccessLoggingBucketA6D88F29", "Arn" ] }, "/*" ] ] }
           }
@@ -158,11 +184,29 @@ export = {
 
     for (const metric of metrics) {
       test.equal('AWS/ApplicationELB', metric.namespace);
-      test.deepEqual(cdk.resolve(metric.dimensions), {
+      test.deepEqual(stack.node.resolve(metric.dimensions), {
         LoadBalancer: { 'Fn::GetAtt': ['LB8A12904C', 'LoadBalancerFullName'] }
       });
     }
 
+    test.done();
+  },
+
+  'loadBalancerName'(test: Test) {
+    // GIVEN
+    const stack = new Stack();
+    const vpc = new ec2.VpcNetwork(stack, 'Stack');
+
+    // WHEN
+    new elbv2.ApplicationLoadBalancer(stack, 'ALB', {
+      loadBalancerName: 'myLoadBalancer',
+      vpc
+    });
+
+    // THEN
+    expect(stack).to(haveResource('AWS::ElasticLoadBalancingV2::LoadBalancer', {
+      Name: 'myLoadBalancer'
+    }));
     test.done();
   },
 };

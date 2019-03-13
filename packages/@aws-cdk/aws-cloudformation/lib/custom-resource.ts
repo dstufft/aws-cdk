@@ -1,7 +1,7 @@
 import lambda = require('@aws-cdk/aws-lambda');
 import sns = require('@aws-cdk/aws-sns');
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from './cloudformation.generated';
+import { CfnCustomResource } from './cloudformation.generated';
 
 /**
  * Collection of arbitrary properties
@@ -19,14 +19,14 @@ export interface CustomResourceProps {
    *
    * Optional, exactly one of lamdaProvider or topicProvider must be set.
    */
-  lambdaProvider?: lambda.FunctionRef;
+  lambdaProvider?: lambda.IFunction;
 
   /**
    * The SNS Topic for the provider that implements this custom resource.
    *
    * Optional, exactly one of lamdaProvider or topicProvider must be set.
    */
-  topicProvider?: sns.TopicRef;
+  topicProvider?: sns.ITopic;
 
   /**
    * Properties to pass to the Lambda
@@ -62,18 +62,18 @@ export interface CustomResourceProps {
  * that hides the choice of provider, and accepts a strongly-typed properties
  * object with the properties your provider accepts.
  */
-export class CustomResource extends cloudformation.CustomResource {
+export class CustomResource extends CfnCustomResource {
   // Needs to be implemented using inheritance because we must override the `renderProperties`
   // The generated props classes will never render properties that they don't know about.
 
   private readonly userProperties?: Properties;
 
-  constructor(parent: cdk.Construct, name: string, props: CustomResourceProps) {
+  constructor(scope: cdk.Construct, id: string, props: CustomResourceProps) {
     if (!!props.lambdaProvider === !!props.topicProvider) {
       throw new Error('Exactly one of "lambdaProvider" or "topicProvider" must be set.');
     }
 
-    super(parent, name, {
+    super(scope, id, {
       serviceToken: props.lambdaProvider ? props.lambdaProvider.functionArn : props.topicProvider!.topicArn
     });
 

@@ -1,12 +1,31 @@
 import iam = require('@aws-cdk/aws-iam');
 import cdk = require('@aws-cdk/cdk');
-import { cloudformation } from './apigateway.generated';
+import { CfnAccount, CfnRestApi } from './apigateway.generated';
 import { Deployment } from './deployment';
 import { Integration } from './integration';
 import { Method, MethodOptions } from './method';
-import { IRestApiResource, ProxyResource, Resource, ResourceOptions } from './resource';
-import { RestApiRef } from './restapi-ref';
+import { IRestApiResource, ResourceBase, ResourceOptions } from './resource';
 import { Stage, StageOptions } from './stage';
+
+export interface RestApiImportProps {
+  /**
+   * The REST API ID of an existing REST API resource.
+   */
+  restApiId: string;
+}
+
+export interface IRestApi extends cdk.IConstruct {
+  /**
+   * The ID of this API Gateway RestApi.
+   */
+  readonly restApiId: string;
+
+  /**
+   * Exports a REST API resource from this stack.
+   * @returns REST API props that can be imported to another stack.
+   */
+  export(): RestApiImportProps;
+}
 
 export interface RestApiProps extends ResourceOptions {
   /**
@@ -118,7 +137,7 @@ export interface RestApiProps extends ResourceOptions {
   /**
    * The ID of the API Gateway RestApi resource that you want to clone.
    */
-  cloneFrom?: RestApiRef;
+  cloneFrom?: IRestApi;
 
   /**
    * Automatically configure an AWS CloudWatch role for API Gateway.
@@ -135,7 +154,17 @@ export interface RestApiProps extends ResourceOptions {
  * By default, the API will automatically be deployed and accessible from a
  * public endpoint.
  */
-export class RestApi extends RestApiRef implements cdk.IDependable {
+export class RestApi extends cdk.Construct implements IRestApi {
+  /**
+   * Imports an existing REST API resource.
+   * @param parent Parent construct
+   * @param id Construct ID
+   * @param props Imported rest API properties
+   */
+  public static import(scope: cdk.Construct, id: string, props: RestApiImportProps): IRestApi {
+    return new ImportedRestApi(scope, id, props);
+  }
+
   /**
    * The ID of this API Gateway RestApi.
    */
@@ -147,11 +176,6 @@ export class RestApi extends RestApiRef implements cdk.IDependable {
    * This will be undefined if `deploy` is false.
    */
   public latestDeployment?: Deployment;
-
-  /**
-   * Allows taking a dependency on this construct.
-   */
-  public readonly dependencyElements = new Array<cdk.IDependable>();
 
   /**
    * API Gateway stage that points to the latest deployment (if defined).
@@ -172,10 +196,10 @@ export class RestApi extends RestApiRef implements cdk.IDependable {
 
   private readonly methods = new Array<Method>();
 
-  constructor(parent: cdk.Construct, id: string, props: RestApiProps = { }) {
-    super(parent, id);
+  constructor(scope: cdk.Construct, id: string, props: RestApiProps = { }) {
+    super(scope, id);
 
-    const resource = new cloudformation.RestApiResource(this, 'Resource', {
+    const resource = new CfnRestApi(this, 'Resource', {
       name: props.restApiName || id,
       description: props.description,
       policy: props.policy,
@@ -197,30 +221,16 @@ export class RestApi extends RestApiRef implements cdk.IDependable {
       this.configureCloudWatchRole(resource);
     }
 
-    this.dependencyElements.push(resource);
-    if (this.latestDeployment) {
-      this.dependencyElements.push(this.latestDeployment);
-    }
-    if (this.deploymentStage) {
-      this.dependencyElements.push(this.deploymentStage);
-    }
+    this.root = new RootResource(this, props, resource.restApiRootResourceId);
+  }
 
-    // configure the "root" resource
-    this.root = {
-      addResource: (pathPart: string, options?: ResourceOptions) => {
-        return new Resource(this, pathPart, { parent: this.root, pathPart, ...options });
-      },
-      addMethod: (httpMethod: string, integration?: Integration, options?: MethodOptions) => {
-        return new Method(this, httpMethod, { resource: this.root, httpMethod, integration, options });
-      },
-      addProxy: (options?: ResourceOptions) => {
-        return new ProxyResource(this, '{proxy+}', { parent: this.root, ...options });
-      },
-      defaultIntegration: props.defaultIntegration,
-      defaultMethodOptions: props.defaultMethodOptions,
-      resourceApi: this,
-      resourceId: resource.restApiRootResourceId,
-      resourcePath: '/'
+  /**
+   * Exports a REST API resource from this stack.
+   * @returns REST API props that can be imported to another stack.
+   */
+  public export(): RestApiImportProps {
+    return {
+      restApiId: new cdk.Output(this, 'RestApiId', { value: this.restApiId }).makeImportValue().toString()
     };
   }
 
@@ -261,7 +271,7 @@ export class RestApi extends RestApiRef implements cdk.IDependable {
       method = '*';
     }
 
-    return cdk.ArnUtils.fromComponents({
+    return this.node.stack.formatArn({
       service: 'execute-api',
       resource: this.restApiId,
       sep: '/',
@@ -270,22 +280,22 @@ export class RestApi extends RestApiRef implements cdk.IDependable {
   }
 
   /**
-   * Performs validation of the REST API.
-   */
-  public validate() {
-    if (this.methods.length === 0) {
-      return [ `The REST API doesn't contain any methods` ];
-    }
-
-    return [];
-  }
-
-  /**
    * Internal API used by `Method` to keep an inventory of methods at the API
    * level for validation purposes.
    */
   public _attachMethod(method: Method) {
     this.methods.push(method);
+  }
+
+  /**
+   * Performs validation of the REST API.
+   */
+  protected validate() {
+    if (this.methods.length === 0) {
+      return [ `The REST API doesn't contain any methods` ];
+    }
+
+    return [];
   }
 
   private configureDeployment(props: RestApiProps) {
@@ -315,10 +325,10 @@ export class RestApi extends RestApiRef implements cdk.IDependable {
     }
   }
 
-  private configureCloudWatchRole(apiResource: cloudformation.RestApiResource) {
+  private configureCloudWatchRole(apiResource: CfnRestApi) {
     const role = new iam.Role(this, 'CloudWatchRole', {
       assumedBy: new iam.ServicePrincipal('apigateway.amazonaws.com'),
-      managedPolicyArns: [ cdk.ArnUtils.fromComponents({
+      managedPolicyArns: [ this.node.stack.formatArn({
         service: 'iam',
         region: '',
         account: 'aws',
@@ -328,11 +338,11 @@ export class RestApi extends RestApiRef implements cdk.IDependable {
       }) ]
     });
 
-    const resource = new cloudformation.AccountResource(this, 'Account', {
+    const resource = new CfnAccount(this, 'Account', {
       cloudWatchRoleArn: role.roleArn
     });
 
-    resource.addDependency(apiResource);
+    resource.node.addDependency(apiResource);
   }
 }
 
@@ -365,4 +375,36 @@ export enum EndpointType {
   Private = 'PRIVATE'
 }
 
-export class RestApiUrl extends cdk.CloudFormationToken { }
+class ImportedRestApi extends cdk.Construct implements IRestApi {
+  public restApiId: string;
+
+  constructor(scope: cdk.Construct, id: string, private readonly props: RestApiImportProps) {
+    super(scope, id);
+
+    this.restApiId = props.restApiId;
+  }
+
+  public export() {
+    return this.props;
+  }
+}
+
+class RootResource extends ResourceBase {
+  public readonly parentResource?: IRestApiResource;
+  public readonly resourceApi: RestApi;
+  public readonly resourceId: string;
+  public readonly resourcePath: string;
+  public readonly defaultIntegration?: Integration | undefined;
+  public readonly defaultMethodOptions?: MethodOptions | undefined;
+
+  constructor(api: RestApi, props: RestApiProps, resourceId: string) {
+    super(api, 'Default');
+
+    this.parentResource = undefined;
+    this.defaultIntegration = props.defaultIntegration;
+    this.defaultMethodOptions = props.defaultMethodOptions;
+    this.resourceApi = api;
+    this.resourceId = resourceId;
+    this.resourcePath = '/';
+  }
+}

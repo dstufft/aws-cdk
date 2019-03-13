@@ -1,11 +1,11 @@
 import cxapi = require('@aws-cdk/cx-api');
 import { App } from '../app';
-import { Construct, PATH_SEP } from '../core/construct';
-import { resolve, Token } from '../core/tokens';
+import { Construct, IConstruct, PATH_SEP } from '../core/construct';
 import { Environment } from '../environment';
-import { CloudFormationToken } from './cloudformation-token';
+import { ISynthesisSession } from '../synthesis';
+import { CfnReference } from './cfn-tokens';
 import { HashedAddressingScheme, IAddressingScheme, LogicalIDs } from './logical-id';
-import { Resource } from './resource';
+import { Parameter } from './parameter';
 
 export interface StackProps {
   /**
@@ -29,23 +29,6 @@ export interface StackProps {
  */
 export class Stack extends Construct {
   /**
-   * Traverses the tree and looks up for the Stack root.
-   * @param node A construct in the tree
-   * @returns The Stack object (throws if the node is not part of a Stack-rooted tree)
-   */
-  public static find(node: Construct): Stack {
-    let curr: Construct | undefined = node;
-    while (curr != null && !isStack(curr)) {
-      curr = curr.parent;
-    }
-
-    if (curr == null) {
-      throw new Error(`Cannot find a Stack parent for '${node.toString()}'`);
-    }
-    return curr;
-  }
-
-  /**
    * Adds a metadata annotation "aws:cdk:physical-name" to the construct if physicalName
    * is non-null. This can be used later by tools and aspects to determine if resources
    * have been created with physical names.
@@ -55,7 +38,16 @@ export class Stack extends Construct {
       return;
     }
 
-    construct.addMetadata('aws:cdk:physical-name', physicalName);
+    construct.node.addMetadata('aws:cdk:physical-name', physicalName);
+  }
+
+  /**
+   * Return whether the given object is a Stack.
+   *
+   * We do attribute detection since we can't reliably use 'instanceof'.
+   */
+  public static isStack(construct: IConstruct): construct is Stack {
+    return (construct as any)._isStack;
   }
 
   private static readonly VALID_STACK_NAME_REGEX = /^[A-Za-z][A-Za-z0-9-]*$/;
@@ -73,11 +65,6 @@ export class Stack extends Construct {
   public readonly env: Environment;
 
   /**
-   * Used to determine if this construct is a stack.
-   */
-  public readonly isStack = true;
-
-  /**
    * Logical ID generation strategy
    */
   public readonly logicalIds: LogicalIDs;
@@ -92,20 +79,49 @@ export class Stack extends Construct {
    */
   public readonly name: string;
 
+  /*
+   * Used to determine if this construct is a stack.
+   */
+  protected readonly _isStack = true;
+
+  /**
+   * Other stacks this stack depends on
+   */
+  private readonly stackDependencies = new Set<Stack>();
+
+  /**
+   * Values set for parameters in cloud assembly.
+   */
+  private readonly parameterValues: { [logicalId: string]: string } = { };
+
   /**
    * Creates a new stack.
    *
-   * @param parent Parent of this stack, usually a Program instance.
+   * @param scope Parent of this stack, usually a Program instance.
    * @param name The name of the CloudFormation stack. Defaults to "Stack".
    * @param props Stack properties.
    */
-  public constructor(parent?: App, name?: string, props?: StackProps) {
+  public constructor(scope?: App, name?: string, private readonly props?: StackProps) {
     // For unit test convenience parents are optional, so bypass the type check when calling the parent.
-    super(parent!, name!);
+    super(scope!, name!);
+
+    if (name && !Stack.VALID_STACK_NAME_REGEX.test(name)) {
+      throw new Error(`Stack name must match the regular expression: ${Stack.VALID_STACK_NAME_REGEX.toString()}, got '${name}'`);
+    }
+
     this.env = this.parseEnvironment(props);
 
     this.logicalIds = new LogicalIDs(props && props.namingScheme ? props.namingScheme : new HashedAddressingScheme());
-    this.name = name || 'Stack';
+    this.name = this.node.id;
+  }
+
+  /**
+   * Returns the environment specification for this stack (aws://account/region).
+   */
+  public get environment() {
+    const account = this.env.account || 'unknown-account';
+    const region = this.env.region || 'unknown-region';
+    return `aws://${account}/${region}`;
   }
 
   /**
@@ -114,7 +130,7 @@ export class Stack extends Construct {
    * @returns The Resource or undefined if not found
    */
   public findResource(path: string): Resource | undefined {
-    const r = this.findChild(path);
+    const r = this.node.findChild(path);
     if (!r) { return undefined; }
 
     // found an element, check if it's a resource (duck-type)
@@ -131,7 +147,7 @@ export class Stack extends Construct {
    */
   public toCloudFormation() {
     // before we begin synthesis, we shall lock this stack, so children cannot be added
-    this.lock();
+    this.node.lock();
 
     try {
       const template: any = {
@@ -142,7 +158,7 @@ export class Stack extends Construct {
       };
 
       const elements = stackElements(this);
-      const fragments = elements.map(e => e.toCloudFormation());
+      const fragments = elements.map(e => this.node.resolve(e.toCloudFormation()));
 
       // merge in all CloudFormation fragments collected from the tree
       for (const fragment of fragments) {
@@ -150,14 +166,14 @@ export class Stack extends Construct {
       }
 
       // resolve all tokens and remove all empties
-      const ret = resolve(template) || { };
+      const ret = this.node.resolve(template) || {};
 
       this.logicalIds.assertAllRenamesApplied();
 
       return ret;
     } finally {
       // allow mutations after synthesis is finished.
-      this.unlock();
+      this.node.unlock();
     }
   }
 
@@ -191,7 +207,7 @@ export class Stack extends Construct {
   }
 
   public parentApp(): App | undefined {
-    const parent = this.parent;
+    const parent = this.node.scope;
     return parent instanceof App
       ? parent
       : undefined;
@@ -212,12 +228,176 @@ export class Stack extends Construct {
    * Rename a generated logical identities
    */
   public renameLogical(oldId: string, newId: string) {
-    // tslint:disable-next-line:no-console
-    if (this.children.length > 0) {
+    if (this.node.children.length > 0) {
       throw new Error("All renames must be set up before adding elements to the stack");
     }
 
     this.logicalIds.renameLogical(oldId, newId);
+  }
+
+  /**
+   * Add a dependency between this stack and another stack
+   */
+  public addDependency(stack: Stack) {
+    if (stack.dependsOnStack(this)) {
+        // tslint:disable-next-line:max-line-length
+        throw new Error(`Stack '${this.name}' already depends on stack '${stack.name}'. Adding this dependency would create a cyclic reference.`);
+    }
+    this.stackDependencies.add(stack);
+  }
+
+  /**
+   * Return the stacks this stack depends on
+   */
+  public dependencies(): Stack[] {
+    return Array.from(this.stackDependencies.values());
+  }
+
+  /**
+   * The account in which this stack is defined
+   *
+   * Either returns the literal account for this stack if it was specified
+   * literally upon Stack construction, or a symbolic value that will evaluate
+   * to the correct account at deployment time.
+   */
+  public get accountId(): string {
+    if (this.props && this.props.env && this.props.env.account) {
+      return this.props.env.account;
+    }
+    // Does not need to be scoped, the only situation in which
+    // Export/Fn::ImportValue would work if { Ref: "AWS::AccountId" } is the
+    // same for provider and consumer anyway.
+    return Aws.accountId;
+  }
+
+  /**
+   * The region in which this stack is defined
+   *
+   * Either returns the literal region for this stack if it was specified
+   * literally upon Stack construction, or a symbolic value that will evaluate
+   * to the correct region at deployment time.
+   */
+  public get region(): string {
+    if (this.props && this.props.env && this.props.env.region) {
+      return this.props.env.region;
+    }
+    // Does not need to be scoped, the only situation in which
+    // Export/Fn::ImportValue would work if { Ref: "AWS::AccountId" } is the
+    // same for provider and consumer anyway.
+    return Aws.region;
+  }
+
+  /**
+   * The partition in which this stack is defined
+   */
+  public get partition(): string {
+    // Always return a non-scoped partition intrinsic. These will usually
+    // be used to construct an ARN, but there are no cross-partition
+    // calls anyway.
+    return Aws.partition;
+  }
+
+  /**
+   * The Amazon domain suffix for the region in which this stack is defined
+   */
+  public get urlSuffix(): string {
+    return new ScopedAws(this).urlSuffix;
+  }
+
+  /**
+   * The ID of the stack
+   *
+   * @example After resolving, looks like arn:aws:cloudformation:us-west-2:123456789012:stack/teststack/51af3dc0-da77-11e4-872e-1234567db123
+   */
+  public get stackId(): string {
+    return new ScopedAws(this).stackId;
+  }
+
+  /**
+   * The name of the stack currently being deployed
+   *
+   * Only available at deployment time.
+   */
+  public get stackName(): string {
+    return new ScopedAws(this).stackName;
+  }
+
+  /**
+   * Returns the list of notification Amazon Resource Names (ARNs) for the current stack.
+   */
+  public get notificationArns(): string[] {
+    return new ScopedAws(this).notificationArns;
+  }
+
+  /**
+   * Creates an ARN from components.
+   *
+   * If `partition`, `region` or `account` are not specified, the stack's
+   * partition, region and account will be used.
+   *
+   * If any component is the empty string, an empty string will be inserted
+   * into the generated ARN at the location that component corresponds to.
+   *
+   * The ARN will be formatted as follows:
+   *
+   *   arn:{partition}:{service}:{region}:{account}:{resource}{sep}}{resource-name}
+   *
+   * The required ARN pieces that are omitted will be taken from the stack that
+   * the 'scope' is attached to. If all ARN pieces are supplied, the supplied scope
+   * can be 'undefined'.
+   */
+  public formatArn(components: ArnComponents): string {
+    return arnFromComponents(components, this);
+  }
+
+  /**
+   * Given an ARN, parses it and returns components.
+   *
+   * If the ARN is a concrete string, it will be parsed and validated. The
+   * separator (`sep`) will be set to '/' if the 6th component includes a '/',
+   * in which case, `resource` will be set to the value before the '/' and
+   * `resourceName` will be the rest. In case there is no '/', `resource` will
+   * be set to the 6th components and `resourceName` will be set to the rest
+   * of the string.
+   *
+   * If the ARN includes tokens (or is a token), the ARN cannot be validated,
+   * since we don't have the actual value yet at the time of this function
+   * call. You will have to know the separator and the type of ARN. The
+   * resulting `ArnComponents` object will contain tokens for the
+   * subexpressions of the ARN, not string literals. In this case this
+   * function cannot properly parse the complete final resourceName (path) out
+   * of ARNs that use '/' to both separate the 'resource' from the
+   * 'resourceName' AND to subdivide the resourceName further. For example, in
+   * S3 ARNs:
+   *
+   *    arn:aws:s3:::my_corporate_bucket/path/to/exampleobject.png
+   *
+   * After parsing the resourceName will not contain
+   * 'path/to/exampleobject.png' but simply 'path'. This is a limitation
+   * because there is no slicing functionality in CloudFormation templates.
+   *
+   * @param sep The separator used to separate resource from resourceName
+   * @param hasName Whether there is a name component in the ARN at all. For
+   * example, SNS Topics ARNs have the 'resource' component contain the topic
+   * name, and no 'resourceName' component.
+   *
+   * @returns an ArnComponents object which allows access to the various
+   * components of the ARN.
+   *
+   * @returns an ArnComponents object which allows access to the various
+   *      components of the ARN.
+   */
+  public parseArn(arn: string, sepIfToken: string = '/', hasName: boolean = true): ArnComponents {
+    return parseArn(arn, sepIfToken, hasName);
+  }
+
+  /**
+   * Sets the value of a CloudFormation parameter.
+   * @param parameter The parameter to set the value for
+   * @param value The value, can use `${}` notation to reference other assembly block attributes.
+   */
+  public setParameterValue(parameter: Parameter, value: string) {
+    this.parameterValues[parameter.logicalId] = value;
   }
 
   /**
@@ -227,9 +407,76 @@ export class Stack extends Construct {
    * character classes, and we don't allow one of the magic markers.
    */
   protected _validateId(name: string) {
-    if (!Stack.VALID_STACK_NAME_REGEX.test(name)) {
+    if (name && !Stack.VALID_STACK_NAME_REGEX.test(name)) {
       throw new Error(`Stack name must match the regular expression: ${Stack.VALID_STACK_NAME_REGEX.toString()}, got '${name}'`);
     }
+  }
+
+  /**
+   * Prepare stack
+   *
+   * Find all CloudFormation references and tell them we're consuming them.
+   *
+   * Find all dependencies as well and add the appropriate DependsOn fields.
+   */
+  protected prepare() {
+    // References
+    for (const ref of this.node.findReferences()) {
+      if (CfnReference.isCfnReference(ref)) {
+        ref.consumeFromStack(this);
+      }
+    }
+
+    // Resource dependencies
+    for (const dependency of this.node.findDependencies()) {
+      const theirStack = dependency.target.node.stack;
+      if (theirStack !== undefined && theirStack !== this) {
+        this.addDependency(theirStack);
+      } else {
+        for (const target of findResources([dependency.target])) {
+          for (const source of findResources([dependency.source])) {
+            source.addDependsOn(target);
+          }
+        }
+      }
+    }
+  }
+
+  protected synthesize(session: ISynthesisSession): void {
+    const template = `${this.node.id}.template.json`;
+
+    // write the CloudFormation template as a JSON file
+    session.store.writeJson(template, this.toCloudFormation());
+
+    const artifact: cxapi.Artifact = {
+      type: cxapi.ArtifactType.AwsCloudFormationStack,
+      environment: this.environment,
+      properties: {
+        templateFile: template,
+      }
+    };
+
+    if (Object.keys(this.parameterValues).length > 0) {
+      artifact.properties = artifact.properties || { };
+      artifact.properties.parameters = this.node.resolve(this.parameterValues);
+    }
+
+    const deps = this.dependencies().map(s => s.node.id);
+    if (deps.length > 0) {
+      artifact.dependencies = deps;
+    }
+
+    const meta = this.collectMetadata();
+    if (Object.keys(meta).length > 0) {
+      artifact.metadata = meta;
+    }
+
+    if (this.missingContext && Object.keys(this.missingContext).length > 0) {
+      artifact.missing = this.missingContext;
+    }
+
+    // add an artifact that represents this stack
+    session.addArtifact(this.node.id, artifact);
   }
 
   /**
@@ -241,15 +488,50 @@ export class Stack extends Construct {
 
     // if account is not specified, attempt to read from context.
     if (!env.account) {
-      env.account = this.getContext(cxapi.DEFAULT_ACCOUNT_CONTEXT_KEY);
+      env.account = this.node.getContext(cxapi.DEFAULT_ACCOUNT_CONTEXT_KEY);
     }
 
     // if region is not specified, attempt to read from context.
     if (!env.region) {
-      env.region = this.getContext(cxapi.DEFAULT_REGION_CONTEXT_KEY);
+      env.region = this.node.getContext(cxapi.DEFAULT_REGION_CONTEXT_KEY);
     }
 
     return env;
+  }
+
+  /**
+   * Check whether this stack has a (transitive) dependency on another stack
+   */
+  private dependsOnStack(other: Stack) {
+    if (this === other) { return true; }
+    for (const dep of this.stackDependencies) {
+      if (dep.dependsOnStack(other)) { return true; }
+    }
+    return false;
+  }
+
+  private collectMetadata() {
+    const output: { [id: string]: cxapi.MetadataEntry[] } = { };
+
+    visit(this);
+
+    const app = this.parentApp();
+    if (app && app.node.metadata.length > 0) {
+      output[PATH_SEP] = app.node.metadata;
+    }
+
+    return output;
+
+    function visit(node: IConstruct) {
+      if (node.node.metadata.length > 0) {
+        // Make the path absolute
+        output[PATH_SEP + node.node.path] = node.node.metadata.map(md => node.node.resolve(md) as cxapi.MetadataEntry);
+      }
+
+      for (const child of node.node.children) {
+        visit(child);
+      }
+    }
   }
 }
 
@@ -271,121 +553,6 @@ function merge(template: any, part: any) {
       }
     }
   }
-}
-
-const LOGICAL_ID_MD = 'aws:cdk:logicalId';
-
-/**
- * Represents a construct that can be "depended on" via `addDependency`.
- */
-export interface IDependable {
-  /**
-   * Returns the set of all stack elements (resources, parameters, conditions)
-   * that should be added when a resource "depends on" this construct.
-   */
-  readonly dependencyElements: IDependable[];
-}
-
-/**
- * An element of a CloudFormation stack.
- */
-export abstract class StackElement extends Construct implements IDependable {
-  /**
-   * Returns `true` if a construct is a stack element (i.e. part of the
-   * synthesized cloudformation template).
-   *
-   * Uses duck-typing instead of `instanceof` to allow stack elements from different
-   * versions of this library to be included in the same stack.
-   *
-   * @returns The construct as a stack element or undefined if it is not a stack element.
-   */
-  public static _asStackElement(construct: Construct): StackElement | undefined {
-    if ('logicalId' in construct && 'toCloudFormation' in construct) {
-      return construct as StackElement;
-    } else {
-      return undefined;
-    }
-  }
-
-  /**
-   * The logical ID for this CloudFormation stack element
-   */
-  public readonly logicalId: string;
-
-  /**
-   * The stack this Construct has been made a part of
-   */
-  protected stack: Stack;
-
-  /**
-   * Creates an entity and binds it to a tree.
-   * Note that the root of the tree must be a Stack object (not just any Root).
-   *
-   * @param parent The parent construct
-   * @param props Construct properties
-   */
-  constructor(parent: Construct, name: string) {
-    super(parent, name);
-    const s = Stack.find(this);
-    if (!s) {
-      throw new Error('The tree root must be derived from "Stack"');
-    }
-    this.stack = s;
-
-    this.addMetadata(LOGICAL_ID_MD, new Token(() => this.logicalId), this.constructor);
-
-    this.logicalId = this.stack.logicalIds.getLogicalId(this);
-  }
-
-  /**
-   * @returns the stack trace of the point where this Resource was created from, sourced
-   *      from the +metadata+ entry typed +aws:cdk:logicalId+, and with the bottom-most
-   *      node +internal+ entries filtered.
-   */
-  public get creationStackTrace(): string[] {
-    return filterStackTrace(this.metadata.find(md => md.type === LOGICAL_ID_MD)!.trace);
-
-    function filterStackTrace(stack: string[]): string[] {
-      const result = Array.of(...stack);
-      while (result.length > 0 && shouldFilter(result[result.length - 1])) {
-        result.pop();
-      }
-      // It's weird if we filtered everything, so return the whole stack...
-      return result.length === 0 ? stack : result;
-    }
-
-    function shouldFilter(str: string): boolean {
-      return str.match(/[^(]+\(internal\/.*/) !== null;
-    }
-  }
-
-  /**
-   * Return the path with respect to the stack
-   */
-  public get stackPath(): string {
-    return this.ancestors(this.stack).map(c => c.id).join(PATH_SEP);
-  }
-
-  public get dependencyElements(): IDependable[] {
-    return [ this ];
-  }
-
-  /**
-   * Returns the CloudFormation 'snippet' for this entity. The snippet will only be merged
-   * at the root level to ensure there are no identity conflicts.
-   *
-   * For example, a Resource class will return something like:
-   * {
-   *   Resources: {
-   *     [this.logicalId]: {
-   *       Type: this.resourceType,
-   *       Properties: this.props,
-   *       Condition: this.condition
-   *     }
-   *   }
-   * }
-   */
-  public abstract toCloudFormation(): object;
 }
 
 /**
@@ -415,58 +582,37 @@ export interface TemplateOptions {
 }
 
 /**
- * Base class for referenceable CloudFormation constructs which are not Resources
- *
- * These constructs are things like Conditions and Parameters, can be
- * referenced by taking the `.ref` attribute.
- *
- * Resource constructs do not inherit from Referenceable because they have their
- * own, more specific types returned from the .ref attribute. Also, some
- * resources aren't referenceable at all (such as BucketPolicies or GatewayAttachments).
- */
-export abstract class Referenceable extends StackElement {
-  /**
-   * Returns a token to a CloudFormation { Ref } that references this entity based on it's logical ID.
-   */
-  public get ref(): string {
-    return new Ref(this).toString();
-  }
-}
-
-/**
- * Return whether the given object is a Stack.
- *
- * We do attribute detection since we can't reliably use 'instanceof'.
- */
-function isStack(construct: Construct): construct is Stack {
-  return (construct as any).isStack;
-}
-
-/**
  * Collect all StackElements from a construct
  *
  * @param node Root node to collect all StackElements from
  * @param into Array to append StackElements to
  * @returns The same array as is being collected into
  */
-function stackElements(node: Construct, into: StackElement[] = []): StackElement[] {
-  const element = StackElement._asStackElement(node);
-  if (element) {
-    into.push(element);
+function stackElements(node: IConstruct, into: StackElement[] = []): StackElement[] {
+  if (StackElement.isStackElement(node)) {
+    into.push(node);
   }
 
-  for (const child of node.children) {
+  for (const child of node.node.children) {
     stackElements(child, into);
   }
 
   return into;
 }
 
+// These imports have to be at the end to prevent circular imports
+import { ArnComponents, arnFromComponents, parseArn } from './arn';
+import { Aws, ScopedAws } from './pseudo';
+import { Resource } from './resource';
+import { StackElement } from './stack-element';
+
 /**
- * A generic, untyped reference to a Stack Element
+ * Find all resources in a set of constructs
  */
-export class Ref extends CloudFormationToken {
-  constructor(element: StackElement) {
-    super({ Ref: element.logicalId }, `${element.logicalId}.Ref`);
+function findResources(roots: Iterable<IConstruct>): Resource[] {
+  const ret = new Array<Resource>();
+  for (const root of roots) {
+    ret.push(...root.node.findAll().filter(Resource.isResource));
   }
+  return ret;
 }

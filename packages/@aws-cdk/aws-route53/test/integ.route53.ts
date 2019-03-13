@@ -1,6 +1,6 @@
 import ec2 = require('@aws-cdk/aws-ec2');
 import cdk = require('@aws-cdk/cdk');
-import { PrivateHostedZone, PublicHostedZone, TXTRecord } from '../lib';
+import { CnameRecord, PrivateHostedZone, PublicHostedZone, TxtRecord } from '../lib';
 
 const app = new cdk.App();
 
@@ -15,11 +15,22 @@ const privateZone = new PrivateHostedZone(stack, 'PrivateZone', {
 const publicZone = new PublicHostedZone(stack, 'PublicZone', {
   zoneName: 'cdk.test'
 });
+const publicSubZone = new PublicHostedZone(stack, 'PublicSubZone', {
+  zoneName: 'sub.cdk.test'
+});
+publicZone.addDelegation(publicSubZone);
 
-new TXTRecord(privateZone, 'TXT', {
+new TxtRecord(privateZone, 'TXT', {
+  zone: privateZone,
   recordName: '_foo',
   recordValue: 'Bar!',
   ttl: 60
+});
+
+new CnameRecord(stack, 'CNAME', {
+  zone: privateZone,
+  recordName: 'www',
+  recordValue: 'server'
 });
 
 new cdk.Output(stack, 'PrivateZoneId', { value: privateZone.hostedZoneId });

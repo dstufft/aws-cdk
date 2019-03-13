@@ -1,7 +1,7 @@
 import cloudwatch = require('@aws-cdk/aws-cloudwatch');
 import cdk = require('@aws-cdk/cdk');
 import { IAutoScalingGroup } from './auto-scaling-group';
-import { cloudformation } from './autoscaling.generated';
+import { CfnScalingPolicy } from './autoscaling.generated';
 
 /**
  * Base interface for target tracking props
@@ -93,23 +93,18 @@ export interface TargetTrackingScalingPolicyProps extends BasicTargetTrackingSca
   autoScalingGroup: IAutoScalingGroup;
 }
 
-export class TargetTrackingScalingPolicy extends cdk.Construct implements cdk.IDependable {
+export class TargetTrackingScalingPolicy extends cdk.Construct {
   /**
    * ARN of the scaling policy
    */
   public readonly scalingPolicyArn: string;
 
   /**
-   * Inner objects of this policy
-   */
-  public readonly dependencyElements: cdk.IDependable[];
-
-  /**
    * The resource object
    */
-  private resource: cloudformation.ScalingPolicyResource;
+  private resource: CfnScalingPolicy;
 
-  constructor(parent: cdk.Construct, id: string, props: TargetTrackingScalingPolicyProps) {
+  constructor(scope: cdk.Construct, id: string, props: TargetTrackingScalingPolicyProps) {
     if ((props.customMetric === undefined) === (props.predefinedMetric === undefined)) {
       throw new Error(`Exactly one of 'customMetric' or 'predefinedMetric' must be specified.`);
     }
@@ -126,9 +121,9 @@ export class TargetTrackingScalingPolicy extends cdk.Construct implements cdk.ID
       throw new Error('When tracking the ALBRequestCountPerTarget metric, the ALB identifier must be supplied in resourceLabel');
     }
 
-    super(parent, id);
+    super(scope, id);
 
-    this.resource = new cloudformation.ScalingPolicyResource(this, 'Resource', {
+    this.resource = new CfnScalingPolicy(this, 'Resource', {
       policyType: 'TargetTrackingScaling',
       autoScalingGroupName: props.autoScalingGroup.autoScalingGroupName,
       cooldown: props.cooldownSeconds !== undefined ? `${props.cooldownSeconds}` : undefined,
@@ -145,18 +140,10 @@ export class TargetTrackingScalingPolicy extends cdk.Construct implements cdk.ID
     });
 
     this.scalingPolicyArn = this.resource.scalingPolicyArn;
-    this.dependencyElements = [this.resource];
-  }
-
-  /**
-   * Add a dependency on the given dependenable
-   */
-  public addDependency(...other: cdk.IDependable[]) {
-    this.resource.addDependency(...other);
   }
 }
 
-function renderCustomMetric(metric?: cloudwatch.Metric): cloudformation.ScalingPolicyResource.CustomizedMetricSpecificationProperty | undefined {
+function renderCustomMetric(metric?: cloudwatch.Metric): CfnScalingPolicy.CustomizedMetricSpecificationProperty | undefined {
   if (!metric) { return undefined; }
   return {
     dimensions: metric.dimensionsAsList(),

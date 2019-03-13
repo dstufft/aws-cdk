@@ -1,15 +1,14 @@
-import cdk = require("@aws-cdk/cdk");
-import { Action, ActionCategory, CommonActionConstructProps, CommonActionProps } from "./action";
+import { Action, ActionArtifactBounds, ActionCategory, CommonActionProps } from "./action";
 import { Artifact } from "./artifact";
 
 /**
  * Construction properties of the low level {@link BuildAction build action}.
  */
-export interface BuildActionProps extends CommonActionProps, CommonActionConstructProps {
+export interface BuildActionProps extends CommonActionProps {
   /**
    * The source to use as input for this build.
    */
-  inputArtifact?: Artifact;
+  inputArtifact: Artifact;
 
   /**
    * The service provider that the action calls. For example, a valid provider for Source actions is CodeBuild.
@@ -17,16 +16,28 @@ export interface BuildActionProps extends CommonActionProps, CommonActionConstru
   provider: string;
 
   /**
-   * The source action owner (could be 'AWS', 'ThirdParty' or 'Custom').
+   * The upper and lower bounds on the number of input and output artifacts for this Action.
+   */
+  artifactBounds: ActionArtifactBounds;
+
+  /**
+   * The build Action owner (could be 'AWS', 'ThirdParty' or 'Custom').
    *
    * @default 'AWS'
    */
   owner?: string;
 
   /**
+   * The build Action version.
+   *
+   * @default '1'
+   */
+  version?: string;
+
+  /**
    * The name of the build's output artifact.
    */
-  outputArtifactName?: string;
+  outputArtifactName: string;
 
   /**
    * The action's configuration. These are key-value pairs that specify input values for an action.
@@ -45,11 +56,10 @@ export interface BuildActionProps extends CommonActionProps, CommonActionConstru
 export abstract class BuildAction extends Action {
   public readonly outputArtifact: Artifact;
 
-  constructor(parent: cdk.Construct, name: string, props: BuildActionProps) {
-    super(parent, name, {
-      category: ActionCategory.Build,
-      artifactBounds: { minInputs: 1, maxInputs: 1, minOutputs: 0, maxOutputs: 1 },
+  constructor(props: BuildActionProps) {
+    super({
       ...props,
+      category: ActionCategory.Build,
     });
 
     this.addInputArtifact(props.inputArtifact);
